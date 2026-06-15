@@ -1,148 +1,116 @@
 """
-Evaluation metrics and analysis for AgroVision project.
-Includes confusion matrix computation and performance metrics.
+AgroVision Evaluator
+Inference, metrics, confusion matrix, and per-class F1 report.
 """
 
-import torch
 import numpy as np
-from sklearn.metrics import (
-    accuracy_score, precision_score, recall_score, f1_score,
-    confusion_matrix, classification_report
-)
+import torch
+import torch.nn as nn
 import matplotlib.pyplot as plt
 import seaborn as sns
+from sklearn.metrics import (
+    accuracy_score, precision_score, recall_score, f1_score,
+    confusion_matrix, classification_report,
+)
 
 
 class Evaluator:
     """
-    Evaluator class for computing metrics and generating visualizations.
+    Computes metrics and visualizations for a trained model.
+
+    Args:
+        num_classes  : Number of output classes.
+        class_names  : List of class-name strings (length == num_classes).
+        device       : torch.device used for inference.
     """
-    
-    def __init__(self, num_classes, class_names=None, device="cuda"):
-        """
-        Args:
-            num_classes (int): Number of classes
-            class_names (list, optional): List of class names
-            device: torch device
-        """
+
+    def __init__(
+        self,
+        num_classes:  int,
+        class_names:  list[str] | None = None,
+        device:       torch.device     = torch.device("cpu"),
+    ) -> None:
         self.num_classes = num_classes
-        self.device = device
+        self.device      = device
         self.class_names = class_names or [f"Class {i}" for i in range(num_classes)]
-    
-    def predict(self, model, test_loader):
-        """
-        Generate predictions on test data.
-        
-        Args:
-            model: PyTorch model
-            test_loader: DataLoader for test data
-            
-        Returns:
-            tuple: (all_preds, all_labels)
-        """
+
+    #  Inference 
+
+    def predict(self, model: nn.Module, loader: torch.utils.data.DataLoader) -> tuple[np.ndarray, np.ndarray]:
+        """Run model on loader; return (predictions, true_labels)."""
         model.eval()
-        all_preds = []
-        all_labels = []
-        
+        preds_list, labels_list = [], []
         with torch.no_grad():
-            for images, labels in test_loader:
+            for images, labels in loader:
                 images = images.to(self.device)
-                
-                outputs = model(images)
-                _, predicted = torch.max(outputs, 1)
-                
-                all_preds.extend(predicted.cpu().numpy())
-                all_labels.extend(labels.numpy())
-        
-        return np.array(all_preds), np.array(all_labels)
-    
-    def compute_metrics(self, y_true, y_pred) -> dict:
-        """
-        Compute evaluation metrics.
-        
-        Args:
-            y_true (array): True labels
-            y_pred (array): Predicted labels
-            
-        Returns:
-            dict: Dictionary containing all metrics
-        """
-        metrics = {
-            'accuracy': accuracy_score(y_true, y_pred),
-            'precision': precision_score(y_true, y_pred, average='weighted', zero_division=0),
-            'recall': recall_score(y_true, y_pred, average='weighted', zero_division=0),
-            'f1': f1_score(y_true, y_pred, average='weighted', zero_division=0),
+                preds  = model(images).argmax(1)
+                preds_list.extend(preds.cpu().numpy())
+                labels_list.extend(labels.numpy())
+        return np.array(preds_list), np.array(labels_list)
+
+    #  Metrics 
+
+    def compute_metrics(self, y_true: np.ndarray, y_pred: np.ndarray) -> dict:
+        """Return accuracy, weighted precision/recall/F1."""
+        return {
+            "accuracy":  accuracy_score(y_true, y_pred),
+            "precision": precision_score(y_true, y_pred, average="weighted", zero_division=0),
+            "recall":    recall_score(   y_true, y_pred, average="weighted", zero_division=0),
+            "f1":        f1_score(       y_true, y_pred, average="weighted", zero_division=0),
         }
-        
-        return metrics
-    
-    def get_confusion_matrix(self, y_true, y_pred):
+
+    def print_report(self, y_true: np.ndarray, y_pred: np.ndarray) -> None:
+        """Print sklearn classification report."""
+        print(classification_report(y_true, y_pred, target_names=self.class_names, zero_division=0))
+
+    #  Confusion matrix 
+
+    def plot_confusion_matrix(
+        self,
+        y_true:  np.ndarray,
+        y_pred:  np.ndarray,
+        figsize: tuple[int, int] = (10, 8),
+        normalize: bool = False,
+    ) -> None:
         """
-        Compute confusion matrix.
-        
+        Plot a confusion matrix heatmap.
+
         Args:
-            y_true (array): True labels
-            y_pred (array): Predicted labels
-            
-        Returns:
-            np.ndarray: Confusion matrix
+            normalize : If True, normalize by true-label counts (shows rates).
         """
-        return confusion_matrix(y_true, y_pred)
-    
-    def plot_confusion_matrix(self, y_true, y_pred, figsize=(10, 8)):
-        """
-        Plot confusion matrix heatmap.
-        
-        Args:
-            y_true (array): True labels
-            y_pred (array): Predicted labels
-            figsize (tuple): Figure size
-        """
-        cm = self.get_confusion_matrix(y_true, y_pred)
-        
+        cm = confusion_matrix(y_true, y_pred)
+        fmt = ".2f"
+        if normalize:
+            cm = cm.astype(float) / cm.sum(axis=1, keepdims=True)
+        else:
+            fmt = "d"
+
         plt.figure(figsize=figsize)
-        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
-                   xticklabels=self.class_names,
-                   yticklabels=self.class_names,
-                   cbar_kws={'label': 'Count'})
-        plt.title('Confusion Matrix')
-        plt.ylabel('True Label')
-        plt.xlabel('Predicted Label')
+        sns.heatmap(
+            cm, annot=True, fmt=fmt, cmap="Blues",
+            xticklabels=self.class_names,
+            yticklabels=self.class_names,
+            cbar_kws={"label": "Rate" if normalize else "Count"},
+        )
+        plt.title("Confusion Matrix" + (" (normalized)" if normalize else ""))
+        plt.ylabel("True Label")
+        plt.xlabel("Predicted Label")
+        plt.xticks(rotation=45, ha="right")
         plt.tight_layout()
         plt.show()
-    
-    def print_classification_report(self, y_true, y_pred):
+
+    #  Full pipeline 
+
+    def evaluate(self, model: nn.Module, loader: torch.utils.data.DataLoader) -> dict:
         """
-        Print detailed classification report.
-        
-        Args:
-            y_true (array): True labels
-            y_pred (array): Predicted labels
+        End-to-end evaluation: predict → metrics → confusion matrix.
+
+        Returns dict with keys: predictions, true_labels, metrics, confusion_matrix.
         """
-        print("Classification Report:")
-        print(classification_report(y_true, y_pred, 
-                                   target_names=self.class_names,
-                                   zero_division=0))
-    
-    def evaluate(self, model, test_loader):
-        """
-        Full evaluation pipeline.
-        
-        Args:
-            model: PyTorch model
-            test_loader: DataLoader for test data
-            
-        Returns:
-            dict: Dictionary containing all results
-        """
-        y_pred, y_true = self.predict(model, test_loader)
-        metrics = self.compute_metrics(y_true, y_pred)
-        
-        results = {
-            'predictions': y_pred,
-            'true_labels': y_true,
-            'metrics': metrics,
-            'confusion_matrix': self.get_confusion_matrix(y_true, y_pred)
+        y_pred, y_true = self.predict(model, loader)
+        return {
+            "predictions":    y_pred,
+            "true_labels":    y_true,
+            "metrics":        self.compute_metrics(y_true, y_pred),
+            "confusion_matrix": confusion_matrix(y_true, y_pred),
         }
-        
-        return results

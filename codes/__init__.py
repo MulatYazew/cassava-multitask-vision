@@ -16,5 +16,8 @@ __all__ = [
     'data_handler',
     'model',
     'train',
-    'evaluate'
+    'evaluate',
+    'outlier_handler',
+    'gradcam',
+    'loss'
 ]

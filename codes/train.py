@@ -1,165 +1,156 @@
 """
-Training loop for AgroVision project.
-Handles model training, validation, and checkpointing.
+AgroVision Trainer
+Training loop with:
+  - Weighted CrossEntropyLoss (handles class imbalance)
+  - CosineAnnealingLR scheduler
+  - Early stopping on validation loss
+  - Best-model checkpointing
+  - MPS (Apple Silicon) compatible
 """
+
+import time
+from pathlib import Path
+from typing import Optional
 
 import torch
 import torch.nn as nn
-from torch.optim import Adam
-import time
-from pathlib import Path
-from typing import Tuple, Dict
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 
 class Trainer:
     """
-    Trainer class for managing the training loop.
+    Manages the full training loop.
+
+    Args:
+        model         : PyTorch model.
+        device        : torch.device.
+        learning_rate : Initial LR (default 1e-3).
+        weight_decay  : AdamW weight decay (default 1e-5).
+        class_weights : Optional 1-D tensor for weighted loss (shape: num_classes).
+                        Pass compute_class_weights(train_df) from data_handler.
     """
-    
-    def __init__(self, model, device, learning_rate=0.001, weight_decay=1e-5):
-        """
-        Args:
-            model: PyTorch model
-            device: torch.device object
-            learning_rate (float): Learning rate
-            weight_decay (float): Weight decay for regularization
-        """
-        self.model = model
+
+    def __init__(
+        self,
+        model:          nn.Module,
+        device:         torch.device,
+        learning_rate:  float ,
+        weight_decay:   float ,
+        class_weights:  Optional[torch.Tensor] = None,
+    ) -> None:
+        self.model  = model
         self.device = device
-        self.criterion = nn.CrossEntropyLoss()
-        self.optimizer = Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-        
-        self.best_val_loss = float('inf')
-        self.patience_counter = 0
-        self.history = {
-            'train_loss': [],
-            'val_loss': [],
-            'train_acc': [],
-            'val_acc': []
+
+        # Weighted loss counteracts class imbalance.
+        w = class_weights.to(device) if class_weights is not None else None
+        self.criterion = nn.CrossEntropyLoss(weight=w)
+
+        # AdamW is generally preferred over Adam for regularization.
+        self.optimizer = AdamW(
+            model.parameters(),
+            lr=learning_rate,
+            weight_decay=weight_decay,
+        )
+
+        self.history: dict[str, list[float]] = {
+            "train_loss": [], "val_loss": [],
+            "train_acc":  [], "val_acc":  [],
+            "lr":         [],
         }
-    
-    def train_epoch(self, train_loader) -> Tuple[float, float]:
-        """
-        Train for one epoch.
-        
-        Args:
-            train_loader: DataLoader for training data
-            
-        Returns:
-            tuple: (average_loss, accuracy)
-        """
-        self.model.train()
-        total_loss = 0.0
-        total_correct = 0
-        total_samples = 0
-        
-        for images, labels in train_loader:
-            images = images.to(self.device)
-            labels = labels.to(self.device)
-            
-            # Forward pass
-            self.optimizer.zero_grad()
-            outputs = self.model(images)
-            loss = self.criterion(outputs, labels)
-            
-            # Backward pass
-            loss.backward()
-            self.optimizer.step()
-            
-            # Metrics
-            total_loss += loss.item() * images.size(0)
-            _, predicted = torch.max(outputs, 1)
-            total_correct += (predicted == labels).sum().item()
-            total_samples += labels.size(0)
-        
-        avg_loss = total_loss / total_samples
-        accuracy = total_correct / total_samples
-        
-        return avg_loss, accuracy
-    
-    def validate(self, val_loader) -> Tuple[float, float]:
-        """
-        Validate the model.
-        
-        Args:
-            val_loader: DataLoader for validation data
-            
-        Returns:
-            tuple: (average_loss, accuracy)
-        """
-        self.model.eval()
-        total_loss = 0.0
-        total_correct = 0
-        total_samples = 0
-        
-        with torch.no_grad():
-            for images, labels in val_loader:
-                images = images.to(self.device)
-                labels = labels.to(self.device)
-                
+        self._best_val_loss    = float("inf")
+        self._patience_counter = 0
+
+    #  Single-epoch helpers 
+
+    def run_epoch(
+        self, loader: torch.utils.data.DataLoader, training: bool
+    ) -> tuple[float, float]:
+        self.model.train(training)
+        total_loss, correct, n = 0.0, 0, 0
+
+        ctx = torch.enable_grad() if training else torch.no_grad()
+        with ctx:
+            for images, labels in loader:
+                images, labels = images.to(self.device), labels.to(self.device)
+
+                if training:
+                    self.optimizer.zero_grad()
+
                 outputs = self.model(images)
-                loss = self.criterion(outputs, labels)
-                
+                loss    = self.criterion(outputs, labels)
+
+                if training:
+                    loss.backward()
+                    # Gradient clipping improves MPS stability.
+                    nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                    self.optimizer.step()
+
                 total_loss += loss.item() * images.size(0)
-                _, predicted = torch.max(outputs, 1)
-                total_correct += (predicted == labels).sum().item()
-                total_samples += labels.size(0)
-        
-        avg_loss = total_loss / total_samples
-        accuracy = total_correct / total_samples
-        
-        return avg_loss, accuracy
-    
-    def train(self, train_loader, val_loader, num_epochs=50, patience=5, 
-              model_save_dir="models"):
+                correct    += (outputs.argmax(1) == labels).sum().item()
+                n          += labels.size(0)
+
+        return total_loss / n, correct / n
+
+    #  Full training loop 
+
+    def train(
+        self,
+        train_loader:   torch.utils.data.DataLoader,
+        val_loader:     torch.utils.data.DataLoader,
+        num_epochs:     int ,
+        patience:       int ,
+        model_save_dir: str,
+    ) -> dict[str, list[float]]:
         """
-        Full training loop with early stopping.
-        
+        Train with early stopping and cosine LR annealing.
+
         Args:
-            train_loader: DataLoader for training data
-            val_loader: DataLoader for validation data
-            num_epochs (int): Number of epochs
-            patience (int): Early stopping patience
-            model_save_dir (str): Directory to save checkpoints
+            train_loader   : Training DataLoader.
+            val_loader     : Validation DataLoader.
+            num_epochs     : Maximum epochs.
+            patience       : Early-stopping patience (epochs without improvement).
+            model_save_dir : Directory to save best_model.pth.
+
+        Returns:
+            history dict with train/val loss & accuracy per epoch, plus LR.
         """
         Path(model_save_dir).mkdir(parents=True, exist_ok=True)
-        
-        start_time = time.time()
-        
-        for epoch in range(num_epochs):
-            # Train and validate
-            train_loss, train_acc = self.train_epoch(train_loader)
-            val_loss, val_acc = self.validate(val_loader)
-            
-            # Store history
-            self.history['train_loss'].append(train_loss)
-            self.history['val_loss'].append(val_loss)
-            self.history['train_acc'].append(train_acc)
-            self.history['val_acc'].append(val_acc)
-            
-            # Log progress
-            print(f"Epoch [{epoch+1}/{num_epochs}]")
-            print(f"  Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}")
-            print(f"  Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
-            
-            # Early stopping
-            if val_loss < self.best_val_loss:
-                self.best_val_loss = val_loss
-                self.patience_counter = 0
-                
-                # Save checkpoint
-                checkpoint_path = f"{model_save_dir}/best_model.pth"
-                torch.save(self.model.state_dict(), checkpoint_path)
-                print(f"  [BEST] Model saved to {checkpoint_path}")
+        scheduler = CosineAnnealingLR(self.optimizer, T_max=num_epochs, eta_min=1e-6)
+
+        t0 = time.time()
+        for epoch in range(1, num_epochs + 1):
+            train_loss, train_acc = self._run_epoch(train_loader, training=True)
+            val_loss,   val_acc   = self._run_epoch(val_loader,   training=False)
+            scheduler.step()
+            lr = self.optimizer.param_groups[0]["lr"]
+
+            self.history["train_loss"].append(train_loss)
+            self.history["val_loss"].append(val_loss)
+            self.history["train_acc"].append(train_acc)
+            self.history["val_acc"].append(val_acc)
+            self.history["lr"].append(lr)
+
+            print(
+                f"Epoch {epoch:3d}/{num_epochs} | "
+                f"Train loss {train_loss:.4f}  acc {train_acc:.4f} | "
+                f"Val loss {val_loss:.4f}  acc {val_acc:.4f} | "
+                f"LR {lr:.2e}"
+            )
+
+            #  Checkpoint & early stopping 
+            if val_loss < self._best_val_loss:
+                self._best_val_loss    = val_loss
+                self._patience_counter = 0
+                ckpt = Path(model_save_dir) / "best_model.pth"
+                torch.save(self.model.state_dict(), ckpt)
+                print(f"  ✓ Best model saved → {ckpt}")
             else:
-                self.patience_counter += 1
-                if self.patience_counter >= patience:
-                    print(f"Early stopping at epoch {epoch+1}")
+                self._patience_counter += 1
+                if self._patience_counter >= patience:
+                    print(f"\nEarly stopping triggered at epoch {epoch}.")
                     break
-            print()
-        
-        # Training summary
-        elapsed_time = time.time() - start_time
-        print(f"Training completed in {elapsed_time/60:.2f} minutes")
-        
+
+        elapsed = time.time() - t0
+        print(f"\nTraining finished in {elapsed / 60:.1f} min.")
         return self.history

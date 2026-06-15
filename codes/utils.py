@@ -1,6 +1,7 @@
 """
-Utility functions for AgroVision project.
-Includes seed management, helper functions, and common utilities.
+AgroVision Utilities
+Seed management, device detection, and common helpers.
+Apple Silicon (MPS) aware.
 """
 
 import os
@@ -9,70 +10,44 @@ import numpy as np
 import torch
 
 
-def set_seed(seed: int = 42):
-    """
-    Set random seed for reproducibility across all libraries.
-    
-    Args:
-        seed (int): Random seed value
-    """
+def set_seed(seed: int ) -> None:
+    """Set random seed across all libraries for reproducibility."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    # MPS does not expose a manual_seed; torch.manual_seed covers it.
     torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.benchmark     = False
 
 
-def create_directories(*paths):
+def get_device() -> torch.device:
     """
-    Create directories if they don't exist.
-    
-    Args:
-        *paths: Variable number of directory paths to create
+    Return the best available device.
+    Priority: MPS (Apple Silicon) → CUDA → CPU
     """
-    for path in paths:
-        os.makedirs(path, exist_ok=True)
-
-
-def get_device():
-    """
-    Get the appropriate device (GPU or CPU).
-    
-    Returns:
-        torch.device: Device object
-    """
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
     if torch.cuda.is_available():
         return torch.device("cuda")
-    else:
-        return torch.device("cpu")
+    return torch.device("cpu")
 
 
-def count_parameters(model):
-    """
-    Count total number of trainable parameters in a model.
-    
-    Args:
-        model: PyTorch model
-        
-    Returns:
-        int: Total number of trainable parameters
-    """
+def create_directories(*paths: str) -> None:
+    """Create directories if they don't exist."""
+    for p in paths:
+        os.makedirs(p, exist_ok=True)
+
+
+def count_parameters(model: torch.nn.Module) -> int:
+    """Return total number of trainable parameters."""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-def format_time(seconds):
-    """
-    Format seconds to HH:MM:SS format.
-    
-    Args:
-        seconds (float): Time in seconds
-        
-    Returns:
-        str: Formatted time string
-    """
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    secs = int(seconds % 60)
-    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+def format_time(seconds: float) -> str:
+    """Format seconds → HH:MM:SS."""
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"

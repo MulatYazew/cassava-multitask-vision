@@ -1,155 +1,120 @@
 """
-Streamlit web application for AgroVision project.
-Provides an interactive interface for Cassava leaf disease prediction.
+AgroVision Africa — Streamlit Demo
+Upload a cassava leaf image and get a disease prediction with
+class probabilities, using the best checkpoint trained in
+AgroVision_Africa.ipynb.
+
+Run with:  streamlit run app.py   (from the project root)
 """
 
-import streamlit as st
-import torch
-import numpy as np
-from PIL import Image
 import sys
 from pathlib import Path
 
-# Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+import numpy as np
+import streamlit as st
+import torch
+import torch.nn.functional as F
+from PIL import Image
 
-from codes.model import create_model
-from codes.utils import set_seed, get_device
-from codes.config import SEED, NUM_CLASSES, INPUT_SIZE, MODEL_ARCHITECTURE
+#  Project imports (code reuse — no redefinitions) 
+ROOT = Path(__file__).resolve().parent.parent  # cassava-multitask-vision/ (demo/ is one level down)
+sys.path.insert(0, str(ROOT))
+
+from codes.config import NUM_CLASSES, INPUT_SIZE, MODELS_DIR, MODEL_ARCHITECTURE  # noqa: E402
+from codes.data_handler import CLASS_NAMES, CLASS_DESCRIPTIONS, get_transforms      # noqa: E402
+from codes.model import create_model                                               # noqa: E402
+from codes.utils import get_device                                                # noqa: E402
 
 
-def load_model(model_path, num_classes=NUM_CLASSES, model_name=MODEL_ARCHITECTURE, device=None):
-    """Load trained model from checkpoint."""
-    if device is None:
-        device = get_device()
-    
-    model = create_model(num_classes=num_classes, pretrained=False, model_name=model_name)
-    model.load_state_dict(torch.load(model_path, map_location=device))
+#  Page config 
+st.set_page_config(page_title="AgroVision Africa — Cassava Diagnosis", page_icon="🌿", layout="centered")
+st.title("🌿 AgroVision Africa")
+st.subheader("Cassava Leaf Disease Classifier")
+st.write(
+    "Upload a photo of a cassava leaf and the model will predict the "
+    "most likely disease class, along with confidence scores for all classes."
+)
+
+
+#  Sidebar — model selection 
+st.sidebar.header("Model")
+available_models = sorted(
+    [p.name for p in Path(MODELS_DIR).glob("*") if (p / "best_model.pth").exists()]
+) if Path(MODELS_DIR).exists() else []
+
+if Path(MODELS_DIR / "best_model.pth").exists():
+    available_models = ["(default)"] + available_models
+
+model_choice = st.sidebar.selectbox(
+    "Checkpoint",
+    options=available_models or ["No checkpoint found"],
+    help="Trained checkpoints saved by train.py / the notebook.",
+)
+
+
+#  Cache model loading 
+@st.cache_resource(show_spinner="Loading model...")
+def load_model(checkpoint_name: str):
+    device = get_device()
+    model = create_model(num_classes=NUM_CLASSES, pretrained=False, model_name=MODEL_ARCHITECTURE)
+
+    if checkpoint_name == "(default)":
+        ckpt_path = Path(MODELS_DIR) / "best_model.pth"
+    else:
+        ckpt_path = Path(MODELS_DIR) / checkpoint_name / "best_model.pth"
+
+    state = torch.load(ckpt_path, map_location=device)
+    model.load_state_dict(state)
     model.to(device)
     model.eval()
-    
     return model, device
 
 
-def predict_image(image, model, device, class_names):
-    """Make prediction on a single image."""
-    from torchvision import transforms
-    
-    # Preprocess image
-    transform = transforms.Compose([
-        transforms.Resize((INPUT_SIZE, INPUT_SIZE)),
-        transforms.ToTensor(),
-        transforms.Normalize(
-            mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225]
-        )
-    ])
-    
-    image_tensor = transform(image).unsqueeze(0).to(device)
-    
+#  Main demo 
+uploaded_file = st.file_uploader("Upload a cassava leaf image", type=["jpg", "jpeg", "png"])
+
+if uploaded_file is not None and available_models and available_models[0] != "No checkpoint found":
+    image = Image.open(uploaded_file).convert("RGB")
+    st.image(image, caption="Uploaded image", use_column_width=True)
+
+    model, device = load_model(model_choice)
+
+    # Same preprocessing pipeline used at validation/inference time.
+    transform = get_transforms(INPUT_SIZE, augment=False)
+    tensor = transform(image=np.array(image))["image"].unsqueeze(0).to(device)
+
     with torch.no_grad():
-        outputs = model(image_tensor)
-        probabilities = torch.nn.functional.softmax(outputs, dim=1)
-        predicted_class = torch.argmax(probabilities, dim=1)
-    
-    return predicted_class.item(), probabilities.cpu().numpy()[0]
+        logits = model(tensor)
+        probs = F.softmax(logits, dim=1).cpu().numpy().flatten()
 
+    pred_idx = int(np.argmax(probs))
 
-def main():
-    """Main Streamlit application."""
-    st.set_page_config(page_title="AgroVision", page_icon="🌾")
-    
-    st.title("🌾 AgroVision - Cassava Leaf Disease Detection")
-    st.markdown("**Identify Cassava leaf diseases using AI**")
-    
-    # Disease class names
-    class_names = [
-        "Cassava Brown Streak Disease",
-        "Cassava Green Mottle Virus",
-        "Cassava Mosaic Disease",
-        "Cassava Leaf Blotch",
-        "Healthy"
-    ]
-    
-    # Set seed for reproducibility
-    set_seed(SEED)
-    device = get_device()
-    
-    # Sidebar
-    st.sidebar.header("Configuration")
-    model_path = st.sidebar.text_input(
-        "Model checkpoint path",
-        value="models/best_model.pth"
+    st.markdown("### Prediction")
+    st.success(f"**{CLASS_NAMES[pred_idx]}** ({probs[pred_idx] * 100:.1f}% confidence)")
+    st.caption(CLASS_DESCRIPTIONS[pred_idx])
+
+    st.markdown("### Class probabilities")
+    prob_table = {
+        CLASS_NAMES[i]: float(probs[i]) for i in range(NUM_CLASSES)
+    }
+    sorted_probs = dict(sorted(prob_table.items(), key=lambda kv: kv[1], reverse=True))
+    st.bar_chart(sorted_probs)
+
+    with st.expander("Raw probabilities"):
+        for name, p in sorted_probs.items():
+            st.write(f"{name}: {p:.4f}")
+
+elif not available_models or available_models[0] == "No checkpoint found":
+    st.warning(
+        "No trained checkpoint found in `models/`. "
+        "Run the training cells in `AgroVision_Africa.ipynb` first, "
+        "then restart this app."
     )
-    
-    try:
-        # Load model
-        with st.spinner("Loading model..."):
-            model, device = load_model(model_path, device=device)
-        st.sidebar.success("Model loaded successfully!")
-    except Exception as e:
-        st.sidebar.error(f"Error loading model: {str(e)}")
-        st.stop()
-    
-    # Main content
-    tab1, tab2 = st.tabs(["Upload Image", "About"])
-    
-    with tab1:
-        st.subheader("Upload a Cassava leaf image")
-        
-        uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"])
-        
-        if uploaded_file is not None:
-            # Display uploaded image
-            image = Image.open(uploaded_file).convert('RGB')
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.image(image, caption="Uploaded Image", use_column_width=True)
-            
-            # Make prediction
-            with st.spinner("Making prediction..."):
-                predicted_class, probabilities = predict_image(
-                    image, model, device, class_names
-                )
-            
-            # Display results
-            with col2:
-                st.subheader("Prediction Results")
-                st.metric("Predicted Class", class_names[predicted_class])
-                st.metric("Confidence", f"{probabilities[predicted_class]*100:.2f}%")
-                
-                # Probability distribution
-                st.subheader("Class Probabilities")
-                prob_dict = {name: prob for name, prob in zip(class_names, probabilities)}
-                st.bar_chart(prob_dict)
-    
-    with tab2:
-        st.subheader("About AgroVision")
-        st.write("""
-        **AgroVision** is an AI-powered system for detecting Cassava leaf diseases.
-        
-        ### Supported Diseases:
-        1. **Cassava Brown Streak Disease** - Bacterial disease causing brown streaks
-        2. **Cassava Green Mottle Virus** - Viral disease with green discoloration
-        3. **Cassava Mosaic Disease** - Major viral disease with mosaic patterns
-        4. **Cassava Leaf Blotch** - Fungal disease causing blotches
-        5. **Healthy** - No disease detected
-        
-        ### How to Use:
-        1. Go to the "Upload Image" tab
-        2. Upload a Cassava leaf image (JPG, JPEG, or PNG)
-        3. View the model's prediction and confidence score
-        4. Check the probability distribution across all classes
-        
-        ### Model Details:
-        - Architecture: EfficientNet-B0
-        - Input Size: 224x224 pixels
-        - Pre-trained on ImageNet
-        
-        For more information, visit the project repository.
-        """)
+else:
+    st.info("Upload an image to get a prediction.")
 
 
-if __name__ == "__main__":
-    main()
+st.sidebar.markdown("---")
+st.sidebar.markdown(
+    "**Classes:**\n" + "\n".join(f"- {v}" for v in CLASS_NAMES.values())
+)
