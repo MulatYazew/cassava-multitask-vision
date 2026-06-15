@@ -55,7 +55,7 @@ def load_label_map(dataset_dir: str | Path) -> dict[int, str]:
 
 #  Augmentation pipelines 
 
-def get_transforms(image_size: int, augment: bool = True) -> A.Compose:
+def get_transforms(image_size: int = 224, augment: bool = True) -> A.Compose:
     """
     Standard pipeline for majority classes and validation/inference.
 
@@ -85,7 +85,7 @@ def get_transforms(image_size: int, augment: bool = True) -> A.Compose:
     ])
 
 
-def get_robust_transforms(image_size: int ) -> A.Compose:
+def get_robust_transforms(image_size: int = 224 ) -> A.Compose:
     """
     Heavy augmentation pipeline for minority classes (CBB, CBSD, CGM).
     Extra ops vs the standard pipeline:
@@ -135,7 +135,7 @@ class CassavaDataset(Dataset):
         image_size : Resize all images to this height/width.
     """
 
-    def __init__(self, dataframe: pd.DataFrame, images_dir: str | Path, image_size: int, augment: bool = True,) -> None:
+    def __init__(self, dataframe: pd.DataFrame, images_dir: str | Path, image_size: int = 224, augment: bool = True,) -> None:
         self.df         = dataframe.reset_index(drop=True)
         self.images_dir = Path(images_dir)
         self.augment    = augment
@@ -165,7 +165,7 @@ class CassavaDataset(Dataset):
 
 #  Class-weight helpers 
 
-def compute_class_weights(dataframe: pd.DataFrame, num_classes: int) -> torch.Tensor:
+def compute_class_weights(dataframe: pd.DataFrame, num_classes: int = 5) -> torch.Tensor:
     """
     Inverse-frequency class weights for CrossEntropyLoss / FocalLoss.
     Formula: w_c = N / (num_classes × count_c)
@@ -178,7 +178,7 @@ def compute_class_weights(dataframe: pd.DataFrame, num_classes: int) -> torch.Te
     return len(dataframe) / (num_classes * counts)
 
 
-def build_weighted_sampler(dataframe: pd.DataFrame, num_classes: int) -> WeightedRandomSampler:
+def build_weighted_sampler(dataframe: pd.DataFrame, num_classes: int = 5) -> WeightedRandomSampler:
     """
     WeightedRandomSampler so every batch has a balanced class mix.
     Pass as sampler= to DataLoader (instead of shuffle=True).
@@ -197,7 +197,7 @@ def build_weighted_sampler(dataframe: pd.DataFrame, num_classes: int) -> Weighte
 
 #  Per-class F1 report 
 
-def per_class_f1_report(all_labels: list[int], all_preds:  list[int], num_classes: int,) -> pd.DataFrame:
+def per_class_f1_report(all_labels: list[int], all_preds:  list[int], num_classes: int = 5,) -> pd.DataFrame:
     """
     DataFrame with precision, recall, F1 per class.
     Prefer this over overall accuracy — a CMD-biased model can hit 95%+

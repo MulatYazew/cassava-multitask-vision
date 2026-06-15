@@ -48,7 +48,7 @@ from torchvision import models
 
 #  Shared classification head 
 
-def make_head(in_features: int, num_classes: int, dropout: float) -> nn.Sequential:
+def make_head(in_features: int, num_classes: int = 5, dropout: float = 0.3) -> nn.Sequential:
     """
     Lightweight two-layer MLP head with regularisation.
 
@@ -321,7 +321,7 @@ MODEL_REGISTRY: dict[str, type[BaseModel]] = {
 }
 
 
-def build_model(name: str,num_classes: int ,dropout: float,) -> BaseModel:
+def build_model(name: str,num_classes: int = 5,dropout: float = 0.3,) -> BaseModel:
     """
     Preferred factory — instantiate a model with backbone **frozen** (Phase 1 ready).
 
@@ -352,7 +352,7 @@ def build_model(name: str,num_classes: int ,dropout: float,) -> BaseModel:
     return model
 
 
-def create_model(num_classes: int, pretrained: bool = True, model_name: str = "efficientnet_v2_s",) -> BaseModel:
+def create_model(num_classes: int = 5, pretrained: bool = True, model_name: str = "efficientnet_v2_s",) -> BaseModel:
     """
     Legacy factory alias — kept for backward compatibility.
 
