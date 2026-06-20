@@ -1,16 +1,9 @@
 """
-AgroVision Africa — Streamlit Demo  (demo/app.py)
-==================================================
-Upload or capture a cassava leaf image to get a disease prediction with
-class probabilities, Grad-CAM explanation, treatment advice, and
-a per-class confidence breakdown.
+AgroVision Africa — Streamlit Demo
 
-Project layout expected:
-  cassava-multitask-vision/
-    codes/          ← config.py, model.py, data_handler.py, utils.py, gradcam.py
-    demo/           ← this file
-    models/
-      best_model.pth  (or models/<run_name>/best_model.pth)
+Upload or capture cassava leaf images to get disease predictions with
+class probabilities, Grad-CAM explanations, treatment advice, and
+per-class confidence breakdowns.
 
 Run:  streamlit run demo/app.py   (from project root)
       OR
@@ -28,11 +21,9 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
-#  Path resolution 
-# Support running from project root (demo/app.py) or from inside demo/
+# ── path resolution ───────────────────────────────────────────────────────────
 FILE = Path(__file__).resolve()
 DEMO_DIR = FILE.parent
-# Walk up until we find a directory that contains 'codes/'
 ROOT = DEMO_DIR
 for _candidate in [DEMO_DIR, DEMO_DIR.parent]:
     if (_candidate / "codes").exists():
@@ -40,21 +31,19 @@ for _candidate in [DEMO_DIR, DEMO_DIR.parent]:
         break
 sys.path.insert(0, str(ROOT))
 
-#  Project imports
+# ── project imports ───────────────────────────────────────────────────────────
 try:
-    from codes.config import (  # noqa: E402
-        NUM_CLASSES, INPUT_SIZE, MODELS_DIR, MODEL_ARCHITECTURE,
-    )
-    from codes.data_handler import CLASS_NAMES, CLASS_DESCRIPTIONS, get_transforms  # noqa: E402
-    from codes.model import create_model  # noqa: E402
-    from codes.utils import get_device  # noqa: E402
+    from codes.config import NUM_CLASSES, INPUT_SIZE, MODELS_DIR
+    from codes.data_handler import CLASS_NAMES, CLASS_DESCRIPTIONS, get_transforms
+    from codes.model import build_model
+    from codes.utils import get_device
+    from codes.gradcam import GradCAM, overlay_heatmap, preprocess_for_gradcam
     _CODES_OK = True
 except ModuleNotFoundError:
     _CODES_OK = False
     NUM_CLASSES = 5
     INPUT_SIZE = 224
     MODELS_DIR = ROOT / "models"
-    MODEL_ARCHITECTURE = "efficientnet_v2_s"
     CLASS_NAMES = {
         0: "Cassava Bacterial Blight (CBB)",
         1: "Cassava Brown Streak Disease (CBSD)",
@@ -70,7 +59,7 @@ except ModuleNotFoundError:
         4: "No visible disease symptoms detected.",
     }
 
-#  Constants 
+# ── constants ─────────────────────────────────────────────────────────────────
 TREATMENTS: dict[int, str] = {
     0: "Remove and destroy infected plant material. Apply copper-based bactericide. Source disease-free cuttings for replanting.",
     1: "Rogue out infected plants immediately — no cure exists. Plant CBSD-tolerant varieties (e.g. Narocass 1). Control whitefly populations.",
@@ -79,17 +68,32 @@ TREATMENTS: dict[int, str] = {
     4: "No action required. Continue regular crop scouting every 2 weeks. Maintain good soil health and weed management.",
 }
 
-SEVERITY: dict[int, str] = {0: "High", 1: "High", 2: "Medium", 3: "High", 4: "None"}
+SEVERITY: dict[int, str]       = {0: "High", 1: "High", 2: "Medium", 3: "High", 4: "None"}
+SEVERITY_COLOR: dict[str, str] = {"High": "#ef4444", "Medium": "#f59e0b", "None": "#22c55e"}
+CLASS_SHORT: dict[int, str]    = {0: "CBB", 1: "CBSD", 2: "CGM", 3: "CMD", 4: "Healthy"}
 
-SEVERITY_COLOR: dict[str, str] = {
-    "High":   "#ef4444",
-    "Medium": "#f59e0b",
-    "None":   "#22c55e",
+MODELS_META: dict[str, dict] = {
+    "resnet50": {
+        "label": "ResNet-50",
+        "desc":  "Classical CNN baseline — fast and well-understood.",
+        "tag":   "CNN · baseline",
+    },
+    "efficientnet_v2_s": {
+        "label": "EfficientNet-V2-S",
+        "desc":  "Fused-MBConv blocks — best accuracy-to-compute ratio.",
+        "tag":   "CNN · recommended",
+    },
+    "swin_tiny": {
+        "label": "Swin-Tiny",
+        "desc":  "Vision Transformer with local-window attention and LoRA fine-tuning.",
+        "tag":   "ViT · LoRA-adapted",
+    },
 }
 
-CLASS_SHORT: dict[int, str] = {0: "CBB", 1: "CBSD", 2: "CGM", 3: "CMD", 4: "Healthy"}
+OOD_MAX_PROB = 0.35   # flag as out-of-distribution if max softmax prob below this
+OOD_ENTROPY  = 0.92   # flag as out-of-distribution if normalized entropy above this
 
-#  Page config 
+# ── page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="AgroVision Africa",
     page_icon="🌿",
@@ -97,7 +101,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-#  Design tokens & global CSS 
+# ── global CSS ────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Inter:wght@300;400;500;600;700&display=swap');
@@ -120,24 +124,20 @@ st.markdown("""
   --sans:     'Inter', sans-serif;
 }
 
-/* ── base ── */
+/* base */
 .stApp { background: var(--bg); font-family: var(--sans); color: var(--text); }
 #MainMenu, footer, header { visibility: hidden; }
 .block-container { padding: 1.5rem 2.5rem 4rem; max-width: 1380px; }
-
-/* ── typography ── */
 h1,h2,h3 { font-family: var(--sans); color: var(--text); }
 
-/* ── page header ── */
+/* page header */
 .av-header {
   display: flex; align-items: center; justify-content: space-between;
   padding-bottom: 1.25rem;
   border-bottom: 1px solid var(--border);
   margin-bottom: 2rem;
 }
-.av-wordmark {
-  display: flex; align-items: center; gap: 14px;
-}
+.av-wordmark { display: flex; align-items: center; gap: 14px; }
 .av-icon {
   width: 44px; height: 44px; border-radius: 10px;
   background: var(--green); display: flex; align-items: center;
@@ -151,17 +151,13 @@ h1,h2,h3 { font-family: var(--sans); color: var(--text); }
   padding: 5px 12px; border-radius: 4px; letter-spacing: 0.06em;
 }
 
-/* ── KPI strip ── */
+/* KPI strip */
 .kpi-strip {
   display: grid; grid-template-columns: repeat(4,1fr);
   border: 1px solid var(--border); border-radius: 12px;
   overflow: hidden; margin-bottom: 2rem;
 }
-.kpi {
-  padding: 1rem 1.25rem;
-  border-right: 1px solid var(--border);
-  background: var(--surface);
-}
+.kpi { padding: 1rem 1.25rem; border-right: 1px solid var(--border); background: var(--surface); }
 .kpi:last-child { border-right: none; }
 .kpi-v { font-family: var(--mono); font-size: 1.4rem; font-weight: 600; color: var(--text); }
 .kpi-v.g { color: var(--green); }
@@ -169,16 +165,12 @@ h1,h2,h3 { font-family: var(--sans); color: var(--text); }
 .kpi-v.a { color: var(--amber); }
 .kpi-l { font-size: 0.7rem; color: var(--text3); margin-top: 4px; }
 
-/* ── section label ── */
+/* section label */
 .sec-label {
   font-family: var(--mono); font-size: 0.72rem; font-weight: 600;
   letter-spacing: 0.12em; text-transform: uppercase; color: var(--text2);
   margin: 0 0 0.85rem;
   display: flex; align-items: center; gap: 8px;
-}
-.sec-dot {
-  width: 6px; height: 6px; border-radius: 50%;
-  background: var(--green); flex-shrink: 0;
 }
 .sec-num {
   background: var(--green-lo); color: var(--green);
@@ -187,19 +179,7 @@ h1,h2,h3 { font-family: var(--sans); color: var(--text); }
   border-radius: 3px; flex-shrink: 0;
 }
 
-/* ── upload zone ── */
-.upload-zone {
-  border: 1.5px dashed var(--border2);
-  border-radius: 14px; padding: 1.75rem 1.5rem;
-  text-align: center; background: var(--surface);
-  margin-bottom: 0.5rem;
-}
-.upload-zone:hover { border-color: var(--green); }
-.upload-icon { font-size: 2.2rem; margin-bottom: 0.5rem; }
-.upload-title { font-size: 0.9rem; font-weight: 600; color: var(--text); margin-bottom: 0.2rem; }
-.upload-hint  { font-size: 0.75rem; color: var(--text2); }
-
-/* ── prediction card ── */
+/* prediction card */
 .pred-card {
   background: var(--panel);
   border: 1px solid var(--border2);
@@ -223,7 +203,7 @@ h1,h2,h3 { font-family: var(--sans); color: var(--text); }
 }
 .divider { border: none; border-top: 1px solid var(--border); margin: 0.85rem 0; }
 
-/* ── prob bars ── */
+/* prob bars */
 .bar-row { display: flex; align-items: center; gap: 9px; margin-bottom: 8px; }
 .bar-lbl { font-size: 0.71rem; color: var(--text2); width: 48px; flex-shrink: 0; }
 .bar-lbl.top { color: var(--text); font-weight: 600; }
@@ -231,7 +211,7 @@ h1,h2,h3 { font-family: var(--sans); color: var(--text); }
 .bar-fill  { height: 100%; border-radius: 3px; }
 .bar-pct   { font-family: var(--mono); font-size: 0.67rem; color: var(--text3); width: 36px; text-align: right; }
 
-/* ── treatment card ── */
+/* treatment card */
 .treatment {
   background: var(--surface);
   border: 1px solid var(--border2);
@@ -246,14 +226,12 @@ h1,h2,h3 { font-family: var(--sans); color: var(--text); }
   color: var(--green); margin-bottom: 5px;
 }
 
-/* ── severity ── */
-.sev-badge {
-  display: inline-flex; align-items: center; gap: 5px; margin-top: 5px;
-}
+/* severity */
+.sev-badge { display: inline-flex; align-items: center; gap: 5px; margin-top: 5px; }
 .sev-dot { width: 7px; height: 7px; border-radius: 50%; }
 .sev-txt { font-family: var(--mono); font-size: 0.63rem; }
 
-/* ── tip card ── */
+/* tip card */
 .tip {
   display: flex; align-items: flex-start; gap: 10px;
   background: var(--surface); border: 1px solid var(--border);
@@ -263,17 +241,17 @@ h1,h2,h3 { font-family: var(--sans); color: var(--text); }
 .tip-title { font-size: 0.77rem; font-weight: 600; color: var(--text); margin-bottom: 2px; }
 .tip-body  { font-size: 0.71rem; color: var(--text2); line-height: 1.5; }
 
-/* ── confidence legend ── */
+/* confidence legend */
 .legend { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 0.75rem; }
 .leg-item { display: flex; align-items: center; gap: 5px; font-size: 0.69rem; color: var(--text3); }
 .leg-dot  { width: 8px; height: 8px; border-radius: 2px; }
 
-/* ── model card (sidebar) ── */
+/* model card (sidebar) */
 .mc-row { display: flex; justify-content: space-between; margin-bottom: 6px; }
 .mc-k { font-size: 0.75rem; color: var(--text3); }
 .mc-v { font-size: 0.75rem; color: var(--text); font-family: var(--mono); }
 
-/* ── no-model banner ── */
+/* no-model banner */
 .no-model {
   background: var(--surface); border: 1px solid var(--border2);
   border-left: 3px solid var(--amber);
@@ -281,20 +259,76 @@ h1,h2,h3 { font-family: var(--sans); color: var(--text); }
   font-size: 0.82rem; color: var(--text2); line-height: 1.7;
 }
 
-/* ── Streamlit widget overrides ── */
+/* OOD banner */
+.ood-banner {
+  background: #1a0f00;
+  border: 1px solid #f59e0b40;
+  border-left: 3px solid var(--amber);
+  border-radius: 10px; padding: 1rem 1.1rem;
+  display: flex; align-items: flex-start; gap: 12px;
+  margin-top: 1rem;
+}
+.ood-icon  { font-size: 1.5rem; flex-shrink: 0; line-height: 1; }
+.ood-title { font-weight: 700; color: var(--amber); margin-bottom: 4px; font-size: 0.9rem; }
+.ood-body  { font-size: 0.78rem; color: var(--text2); line-height: 1.6; }
+
+/* batch result mini-card */
+.batch-card {
+  background: var(--panel);
+  border: 1px solid var(--border2);
+  border-radius: 10px; padding: 0.65rem;
+  margin-top: 0.4rem; text-align: center;
+}
+.batch-label { font-size: 0.78rem; font-weight: 600; color: var(--text); margin-bottom: 2px; }
+.batch-conf  { font-family: var(--mono); font-size: 0.7rem; }
+
+/* model selector info card */
+.model-info-card {
+  background: var(--surface);
+  border: 1px solid var(--border2);
+  border-left: 3px solid var(--green);
+  border-radius: 10px; padding: 0.75rem 1rem;
+  margin-bottom: 1.25rem;
+}
+.model-tag  {
+  font-family: var(--mono); font-size: 0.6rem; color: var(--green);
+  letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 4px;
+}
+.model-desc { font-size: 0.82rem; color: var(--text2); }
+
+/* native Streamlit file uploader — style the dropzone directly */
+div[data-testid="stFileUploaderDropzone"] {
+  border: 1.5px dashed var(--border2) !important;
+  border-radius: 14px !important;
+  padding: 1.75rem 1.5rem !important;
+  background: var(--surface) !important;
+  cursor: pointer !important;
+  transition: border-color 0.15s ease, background 0.15s ease !important;
+}
+div[data-testid="stFileUploaderDropzone"]:hover {
+  border-color: var(--green) !important;
+  background: var(--green-lo) !important;
+}
 div[data-testid="stFileUploader"] > label { display: none !important; }
 div[data-testid="stFileUploader"] section {
   background: transparent !important; border: none !important; padding: 0 !important;
 }
-div[data-testid="stFileUploader"] button {
+
+/* camera input visual boundary */
+div[data-testid="stCameraInput"] {
+  border: 1.5px dashed var(--border2);
+  border-radius: 14px;
+  padding: 0.75rem;
+  background: var(--surface);
+}
+div[data-testid="stCameraInput"] video { border-radius: 10px !important; }
+div[data-testid="stCameraInput"] button {
   background: var(--green-lo) !important; border: 1px solid var(--green) !important;
-  color: var(--green) !important; border-radius: 8px !important;
-  width: 100% !important; margin-top: 10px !important;
-  font-family: var(--sans) !important; font-size: 0.84rem !important;
+  color: var(--green) !important; border-radius: 8px !important; width: 100% !important;
+  margin-top: 8px !important;
 }
-div[data-testid="stFileUploader"] button:hover {
-  background: var(--green) !important; color: #07100a !important;
-}
+
+/* misc overrides */
 .stButton > button {
   background: var(--surface) !important; border: 1px solid var(--border2) !important;
   color: var(--text2) !important; border-radius: 8px !important;
@@ -323,19 +357,16 @@ div[data-testid="stSidebar"] * { color: var(--text2) !important; }
 div[data-testid="stSelectbox"] > div > div {
   background: var(--surface) !important; border-color: var(--border2) !important; color: var(--text) !important;
 }
-div[data-testid="stCameraInput"] button {
-  background: var(--green-lo) !important; border: 1px solid var(--green) !important;
-  color: var(--green) !important; border-radius: 8px !important; width: 100% !important;
-}
+div[data-testid="stRadio"] > div { gap: 6px !important; }
+div[data-testid="stRadio"] label { color: var(--text2) !important; font-size: 0.9rem !important; }
 .stImage img { border-radius: 10px; }
 div[data-testid="stExpander"] { background: var(--panel) !important; border-color: var(--border) !important; }
 </style>
 """, unsafe_allow_html=True)
 
 
-#  Helpers 
+# ── helpers ───────────────────────────────────────────────────────────────────
 def H(html: str) -> None:
-    """Render raw HTML."""
     st.markdown(html, unsafe_allow_html=True)
 
 
@@ -351,15 +382,29 @@ def conf_label(p: float) -> str:
     return "Low — verify manually"
 
 
-#  Model loading 
+# ── checkpoint helpers ────────────────────────────────────────────────────────
+def find_checkpoint(model_name: str) -> Path | None:
+    """Return first existing checkpoint for model_name, or None."""
+    base = Path(MODELS_DIR)
+    per_model = base / model_name / "best_model.pth"
+    if per_model.exists():
+        return per_model
+    default = base / "best_model.pth"
+    if default.exists():
+        return default
+    return None
+
+
+# ── model loading ─────────────────────────────────────────────────────────────
 @st.cache_resource(show_spinner="Loading model weights…")
-def load_model(ckpt_path: str):
+def load_model(model_name: str, ckpt_path: str):
     """Load checkpoint; return (model, device) or (None, device) on failure."""
     device = get_device() if _CODES_OK else torch.device("cpu")
+    if not _CODES_OK:
+        return None, device
     try:
-        model = create_model(num_classes=NUM_CLASSES, pretrained=False, model_name=MODEL_ARCHITECTURE)
+        model = build_model(model_name, num_classes=NUM_CLASSES, dropout=0.3)
         state = torch.load(ckpt_path, map_location=device, weights_only=True)
-        # Support checkpoints saved as raw state_dict or wrapped dict
         if isinstance(state, dict) and "net" in state:
             state = state["net"]
         elif isinstance(state, dict) and "state_dict" in state:
@@ -367,56 +412,67 @@ def load_model(ckpt_path: str):
         model.load_state_dict(state)
         model.to(device).eval()
         return model, device
-    except Exception as exc:
-        st.error(f"Failed to load checkpoint: {exc}")
+    except Exception:
         return None, device
 
 
+# ── inference ─────────────────────────────────────────────────────────────────
 def run_inference(image: Image.Image, model, device) -> tuple[int, np.ndarray]:
-    """Preprocess → forward → (pred_idx, probs array)."""
+    """Return (pred_idx, probs array) for one PIL image."""
     img_np = np.array(image.convert("RGB"))
-    if _CODES_OK:
-        transform = get_transforms(INPUT_SIZE, augment=False)
-        tensor = transform(image=img_np)["image"].unsqueeze(0).to(device)
-    else:
-        from torchvision import transforms as T
-        transform = T.Compose([
-            T.Resize((INPUT_SIZE, INPUT_SIZE)),
-            T.ToTensor(),
-            T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
-        ])
-        tensor = transform(Image.fromarray(img_np)).unsqueeze(0).to(device)
-
-    with torch.no_grad():
-        probs = F.softmax(model(tensor), dim=1).cpu().numpy().flatten()
-    return int(np.argmax(probs)), probs
-
-
-#  Checkpoint discovery 
-def discover_checkpoints() -> list[str]:
-    """Return list of available checkpoint paths relative to MODELS_DIR."""
-    options = []
-    models_path = Path(MODELS_DIR)
-    if not models_path.exists():
-        return options
-    # Default flat checkpoint
-    if (models_path / "best_model.pth").exists():
-        options.append("(default)")
-    # Sub-run checkpoints
-    for sub in sorted(models_path.iterdir()):
-        if sub.is_dir() and (sub / "best_model.pth").exists():
-            options.append(sub.name)
-    return options
+    try:
+        if _CODES_OK:
+            transform = get_transforms(INPUT_SIZE, augment=False)
+            tensor = transform(image=img_np)["image"].unsqueeze(0).to(device)
+        else:
+            from torchvision import transforms as T
+            transform = T.Compose([
+                T.Resize((INPUT_SIZE, INPUT_SIZE)),
+                T.ToTensor(),
+                T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+            ])
+            tensor = transform(Image.fromarray(img_np)).unsqueeze(0).to(device)
+        with torch.no_grad():
+            probs = F.softmax(model(tensor), dim=1).cpu().numpy().flatten()
+        return int(np.argmax(probs)), probs
+    except Exception:
+        uniform = np.ones(NUM_CLASSES, dtype=np.float32) / NUM_CLASSES
+        return 0, uniform
 
 
-def resolve_ckpt(choice: str) -> Path:
-    p = Path(MODELS_DIR)
-    return p / "best_model.pth" if choice == "(default)" else p / choice / "best_model.pth"
+def check_ood(probs: np.ndarray) -> bool:
+    """Return True if the image is likely out-of-distribution (not a cassava leaf)."""
+    max_prob = float(np.max(probs))
+    n = len(probs)
+    entropy = -float(np.sum(probs * np.log(probs + 1e-12))) / np.log(n)
+    return max_prob < OOD_MAX_PROB or entropy > OOD_ENTROPY
 
 
-#  UI components 
+def run_gradcam(
+    image: Image.Image,
+    model,
+    device,
+    pred_idx: int,
+    model_name: str,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Return (overlay_rgb, resized_rgb) or (None, None) on failure."""
+    if not _CODES_OK:
+        return None, None
+    try:
+        img_np = np.array(image.convert("RGB"))
+        input_tensor, resized_rgb = preprocess_for_gradcam(img_np, INPUT_SIZE)
+        cam = GradCAM(model, model_name=model_name)
+        heatmap, _ = cam(input_tensor.to(device), class_idx=pred_idx)
+        cam.remove_hooks()
+        overlay = overlay_heatmap(resized_rgb, heatmap)
+        return overlay, resized_rgb
+    except Exception:
+        return None, None
 
-def render_header(model_ready: bool):
+
+# ── UI components ─────────────────────────────────────────────────────────────
+
+def render_header(model_ready: bool, model_label: str):
     status = "MODEL READY" if model_ready else "NO CHECKPOINT"
     H(f"""
     <div class="av-header">
@@ -424,7 +480,7 @@ def render_header(model_ready: bool):
         <div class="av-icon">🌿</div>
         <div>
           <div class="av-title">AgroVision Africa</div>
-          <div class="av-sub">Cassava Leaf Disease Classifier · EfficientNet-V2-S</div>
+          <div class="av-sub">Cassava Leaf Disease Classifier · {model_label}</div>
         </div>
       </div>
       <span class="av-pill">{status}</span>
@@ -443,20 +499,73 @@ def render_kpis():
     """)
 
 
+def render_model_selector() -> str:
+    """Render model radio selector; return chosen model key."""
+    H('<div class="sec-label"><span class="sec-num">1</span>Select Model</div>')
+
+    options = list(MODELS_META.keys())
+    labels  = [MODELS_META[k]["label"] for k in options]
+
+    chosen_label = st.radio(
+        "Model",
+        labels,
+        index=1,  # default: EfficientNet-V2-S
+        key="model_radio",
+        label_visibility="collapsed",
+    )
+    selected_key = options[labels.index(chosen_label)]
+    meta = MODELS_META[selected_key]
+
+    H(f"""
+    <div class="model-info-card">
+      <div class="model-tag">{meta['tag']}</div>
+      <div class="model-desc">{meta['desc']}</div>
+    </div>
+    """)
+
+    return selected_key
+
+
+def render_no_model(model_name: str):
+    ckpt_hint = f"{MODELS_DIR}/{model_name}/best_model.pth"
+    H(f"""
+    <div class="no-model">
+      <strong style="color:#f59e0b">No checkpoint found for {MODELS_META[model_name]['label']}</strong><br><br>
+      Expected location: <code>{ckpt_hint}</code><br>
+      Train the model in <code>notebooks/AgroVision_Africa.ipynb</code>, then restart this app.
+    </div>
+    """)
+
+
+def render_ood_banner():
+    H("""
+    <div class="ood-banner">
+      <div class="ood-icon">⚠</div>
+      <div>
+        <div class="ood-title">Not a cassava leaf</div>
+        <div class="ood-body">
+          The model cannot confidently classify this image as cassava.
+          It may be a different crop, an object, or a poor-quality photo.<br>
+          Please upload a clear, well-lit photo of a cassava leaf.
+        </div>
+      </div>
+    </div>
+    """)
+
+
 def render_pred_card(pred_idx: int, probs: np.ndarray):
     top_p   = float(probs[pred_idx])
     col     = conf_color(top_p)
     sev     = SEVERITY[pred_idx]
     sev_col = SEVERITY_COLOR[sev]
 
-    # probability bars, sorted by confidence
     sorted_idx = np.argsort(probs)[::-1]
     bars_html = ""
     for idx in sorted_idx:
-        p     = float(probs[idx])
-        w     = max(p * 100, 0.5)
-        bc    = conf_color(p) if idx == pred_idx else "#1e3022"
-        top   = " top" if idx == pred_idx else ""
+        p   = float(probs[idx])
+        w   = max(p * 100, 0.5)
+        bc  = conf_color(p) if idx == pred_idx else "#1e3022"
+        top = " top" if idx == pred_idx else ""
         bars_html += f"""
         <div class="bar-row">
           <span class="bar-lbl{top}">{CLASS_SHORT[idx]}</span>
@@ -485,7 +594,7 @@ def render_pred_card(pred_idx: int, probs: np.ndarray):
       {bars_html}
     </div>
     <div class="treatment">
-      <div class="treat-title">⚕ Recommended Action</div>
+      <div class="treat-title">Recommended Action</div>
       {TREATMENTS[pred_idx]}
     </div>
     <div class="legend">
@@ -496,64 +605,127 @@ def render_pred_card(pred_idx: int, probs: np.ndarray):
     """)
 
 
-def render_no_model():
+def render_gradcam_tab(image: Image.Image, model, device, pred_idx: int, model_name: str):
+    if not _CODES_OK:
+        st.info("Grad-CAM requires the codes/ module. Check your installation.")
+        return
+
+    with st.spinner("Computing Grad-CAM…"):
+        overlay, resized_rgb = run_gradcam(image, model, device, pred_idx, model_name)
+
+    if overlay is None:
+        st.warning("Grad-CAM unavailable for this configuration.")
+        return
+
+    col1, col2 = st.columns(2)
+    with col1:
+        H('<div class="sec-label" style="margin-top:0">Original</div>')
+        st.image(resized_rgb, use_container_width=True)
+    with col2:
+        H('<div class="sec-label" style="margin-top:0">Grad-CAM Overlay</div>')
+        st.image(overlay, use_container_width=True)
+
     H(f"""
-    <div class="no-model">
-      <strong style="color:#f59e0b">No checkpoint found</strong><br><br>
-      Expected location: <code>{MODELS_DIR}/best_model.pth</code><br>
-      Run the training cells in <code>notebooks/AgroVision_Africa.ipynb</code> to generate a
-      checkpoint, then restart this app.
+    <div style="margin-top:0.75rem;padding:0.9rem 1rem;background:var(--surface);
+      border:1px solid var(--border2);border-left:3px solid var(--teal);
+      border-radius:10px;font-size:0.79rem;color:var(--text2);line-height:1.7">
+      <span style="font-family:var(--mono);font-size:0.6rem;letter-spacing:0.1em;
+        text-transform:uppercase;color:var(--teal)">What am I looking at?</span><br>
+      <strong style="color:var(--text)">Grad-CAM</strong> highlights the leaf regions that most
+      influenced the prediction.
+      <span style="color:#ef4444">Red/yellow</span> areas drove the classification;
+      <span style="color:#3b82f6">blue</span> areas had little impact.
+    </div>
+    <div style="margin-top:0.55rem;font-family:var(--mono);font-size:0.65rem;
+      color:var(--text3);letter-spacing:0.05em">
+      Explaining → <strong style="color:var(--text2)">{CLASS_NAMES[pred_idx]}</strong>
     </div>
     """)
 
 
-def render_scan_panel(model, device, model_ready: bool):
+def render_batch_results(images: list[Image.Image], model, device, model_name: str):
+    """Show a grid of results for a batch of images."""
+    H('<div class="sec-label" style="margin-top:1rem">Batch Results</div>')
+    n_cols = min(len(images), 3)
+    cols = st.columns(n_cols)
+    for i, img in enumerate(images):
+        with cols[i % n_cols]:
+            st.image(img, use_container_width=True)
+            pred_idx, probs = run_inference(img, model, device)
+            is_ood = check_ood(probs)
+            if is_ood:
+                H("""
+                <div class="batch-card" style="border-left:3px solid var(--amber)">
+                  <div class="batch-label" style="color:var(--amber)">Not cassava</div>
+                  <div class="batch-conf" style="color:var(--text3)">OOD detected</div>
+                </div>
+                """)
+            else:
+                top_p = float(probs[pred_idx])
+                col   = conf_color(top_p)
+                H(f"""
+                <div class="batch-card">
+                  <div class="batch-label">{CLASS_SHORT[pred_idx]}</div>
+                  <div class="batch-conf" style="color:{col}">{top_p*100:.1f}%</div>
+                </div>
+                """)
+
+
+def render_scan_panel(model, device, model_ready: bool, model_name: str):
     H('<div class="sec-label"><span class="sec-num">2</span>Leaf Disease Scanner</div>')
 
     if not model_ready:
-        render_no_model()
+        render_no_model(model_name)
         return
 
-    tab_up, tab_cam = st.tabs(["📁  Upload image", "📷  Take photo"])
-    image = None
+    tab_up, tab_cam = st.tabs(["📁  Upload image(s)", "📷  Take photo"])
+    images: list[Image.Image] = []
 
     with tab_up:
-        H("""
-        <div class="upload-zone">
-          <div class="upload-icon">🍃</div>
-          <div class="upload-title">Drop a cassava leaf photo here</div>
-          <div class="upload-hint">JPG · PNG · any resolution · ideally well-lit and in-focus</div>
-        </div>""")
         uploaded = st.file_uploader(
-            "Choose file", type=["jpg", "jpeg", "png"],
-            key="uploader", label_visibility="collapsed",
+            "Drop cassava leaf photos here",
+            type=["jpg", "jpeg", "png"],
+            accept_multiple_files=True,
+            key="uploader",
+            label_visibility="collapsed",
         )
         if uploaded:
-            image = Image.open(uploaded).convert("RGB")
+            images = [Image.open(f).convert("RGB") for f in uploaded]
 
     with tab_cam:
-        if "cam_on" not in st.session_state:
-            st.session_state.cam_on = False
-        H("""
-        <div class="upload-zone" style="padding:1rem">
-          <div class="upload-hint">Allow camera access, then tap <strong>Take photo</strong></div>
-        </div>""")
-        if st.button("📷  Open camera", key="btn_cam"):
-            st.session_state.cam_on = True
-        if st.session_state.cam_on:
-            snap = st.camera_input("Camera", key="camera", label_visibility="collapsed")
-            if st.button("✕  Close camera", key="btn_cam_off"):
-                st.session_state.cam_on = False
-            if snap:
-                image = Image.open(snap).convert("RGB")
+        snap = st.camera_input(
+            "Point at a cassava leaf and take a photo",
+            key="camera",
+            label_visibility="collapsed",
+        )
+        if snap:
+            images = [Image.open(snap).convert("RGB")]
 
-    if image:
+    if not images:
+        return
+
+    if len(images) == 1:
+        image = images[0]
         st.image(image, use_container_width=True, caption="Input image")
         with st.spinner("Running inference…"):
             pred_idx, probs = run_inference(image, model, device)
-        render_pred_card(pred_idx, probs)
-        if st.button("↻  Scan another image"):
-            st.rerun()
+            is_ood = check_ood(probs)
+
+        if is_ood:
+            render_ood_banner()
+        else:
+            tab_results, tab_gradcam = st.tabs(["📊  Results", "🔥  Grad-CAM Explanation"])
+            with tab_results:
+                render_pred_card(pred_idx, probs)
+            with tab_gradcam:
+                render_gradcam_tab(image, model, device, pred_idx, model_name)
+
+    else:
+        with st.spinner(f"Analysing {len(images)} images…"):
+            render_batch_results(images, model, device, model_name)
+
+    if st.button("↻  Scan another image"):
+        st.rerun()
 
 
 def render_class_reference():
@@ -576,7 +748,7 @@ def render_class_reference():
 
 
 def render_tips():
-    H('<div class="sec-label" style="margin-top:1.5rem"><span class="sec-num">ℹ</span>Scanning Tips</div>')
+    H('<div class="sec-label" style="margin-top:1.5rem"><span class="sec-num">i</span>Scanning Tips</div>')
     tips = [
         ("🌞", "Good lighting",  "Natural daylight is best — avoid harsh shadows or direct flash."),
         ("🔍", "Frame the leaf", "Fill the image with a single leaf so the model can focus."),
@@ -594,20 +766,23 @@ def render_tips():
         </div>""")
 
 
-def render_sidebar(checkpoint_options: list[str], selected: str | None):
+def render_sidebar(selected_model: str, ckpt: Path | None):
     with st.sidebar:
-        H('<div style="font-size:0.8rem;font-weight:700;color:#dff0e4;margin-bottom:0.75rem">📋 Model Card</div>')
+        H('<div style="font-size:0.8rem;font-weight:700;color:#dff0e4;margin-bottom:0.75rem">Model Card</div>')
+        ckpt_str = str(ckpt) if ckpt else "— not found —"
+        meta = MODELS_META[selected_model]
         H(f"""
         <div>
-          <div class="mc-row"><span class="mc-k">Architecture</span><span class="mc-v">{MODEL_ARCHITECTURE}</span></div>
+          <div class="mc-row"><span class="mc-k">Architecture</span><span class="mc-v">{meta['label']}</span></div>
           <div class="mc-row"><span class="mc-k">Classes</span><span class="mc-v">{NUM_CLASSES}</span></div>
           <div class="mc-row"><span class="mc-k">Input size</span><span class="mc-v">{INPUT_SIZE} × {INPUT_SIZE} px</span></div>
           <div class="mc-row"><span class="mc-k">Transfer</span><span class="mc-v">ImageNet → fine-tune</span></div>
           <div class="mc-row"><span class="mc-k">Dataset</span><span class="mc-v">Cassava Kaggle 2020</span></div>
+          <div class="mc-row"><span class="mc-k">Checkpoint</span><span class="mc-v" style="word-break:break-all;font-size:0.65rem">{Path(ckpt_str).name if ckpt else 'not found'}</span></div>
         </div>
         <hr style="border-color:#1e3022;margin:0.9rem 0">""")
 
-        H('<div style="font-size:0.8rem;font-weight:700;color:#dff0e4;margin-bottom:0.6rem">🌿 Classes</div>')
+        H('<div style="font-size:0.8rem;font-weight:700;color:#dff0e4;margin-bottom:0.6rem">Classes</div>')
         for i in range(NUM_CLASSES):
             dot = SEVERITY_COLOR[SEVERITY[i]]
             H(f"""
@@ -618,64 +793,41 @@ def render_sidebar(checkpoint_options: list[str], selected: str | None):
             </div>""")
 
         H('<hr style="border-color:#1e3022;margin:0.9rem 0">')
-        H('<div style="font-size:0.8rem;font-weight:700;color:#dff0e4;margin-bottom:0.6rem">⚙ Checkpoint</div>')
-        if checkpoint_options:
-            st.selectbox(
-                "Checkpoint", options=checkpoint_options,
-                index=0, key="ckpt_choice", label_visibility="collapsed",
-            )
-        else:
-            st.warning("No checkpoint found.")
-
-        H('<hr style="border-color:#1e3022;margin:0.9rem 0">')
         H('<div style="font-size:0.69rem;color:#3d6348;line-height:1.6">This demo is for research and educational purposes. Always verify predictions with a qualified agronomist before applying treatments.</div>')
 
 
-#  Main 
+# ── main ──────────────────────────────────────────────────────────────────────
 def main():
-    checkpoints = discover_checkpoints()
-
-    # Sidebar (renders checkpoint selector and sets st.session_state.ckpt_choice)
-    render_sidebar(checkpoints, checkpoints[0] if checkpoints else None)
-
-    # Resolve selected checkpoint path
-    ckpt_choice  = st.session_state.get("ckpt_choice", checkpoints[0] if checkpoints else None)
-    model_ready  = bool(ckpt_choice and checkpoints)
-    model, device = (None, torch.device("cpu"))
-
-    if model_ready:
-        ckpt_path = str(resolve_ckpt(ckpt_choice))
-        model, device = load_model(ckpt_path)
-        if model is None:
-            model_ready = False
-
-    #  Header + KPIs 
-    render_header(model_ready)
-    render_kpis()
-
-    #  Two-column layout 
+    # ── two-column layout ──
     left, right = st.columns([3, 2], gap="large")
 
     with left:
-        # Step 1 — crop selector
-        H('<div class="sec-label"><span class="sec-num">1</span>Select Crop</div>')
-        crop = st.selectbox(
-            "Crop", ["Cassava 🌿", "Maize 🌽", "Tomato 🍅", "Sorghum 🌾", "Beans 🫘"],
-            index=0, label_visibility="collapsed",
-        )
-        if "Cassava" not in crop:
-            st.info(
-                f"The model is trained on **cassava leaves only**. "
-                f"Predictions for {crop.split()[0]} will still show cassava disease classes.",
-            )
+        # Step 1 — model selection
+        selected_model = render_model_selector()
 
-        # Step 2 — scan
-        render_scan_panel(model, device, model_ready)
+        # resolve checkpoint & load model
+        ckpt = find_checkpoint(selected_model)
+        model_ready = ckpt is not None
+        model, device = None, torch.device("cpu")
+
+        if model_ready:
+            model, device = load_model(selected_model, str(ckpt))
+            if model is None:
+                model_ready = False
+
+        # header & KPIs (after model selection so we know the label)
+        meta = MODELS_META[selected_model]
+        render_header(model_ready, meta["label"])
+        render_kpis()
+
+        # Step 2 — scanner
+        render_scan_panel(model, device, model_ready, selected_model)
 
         # Step 3 — class reference
         render_class_reference()
 
     with right:
+        render_sidebar(selected_model, ckpt)
         render_tips()
 
 

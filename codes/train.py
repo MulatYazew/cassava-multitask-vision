@@ -1,10 +1,11 @@
 """
 AgroVision Trainer
 Training loop with:
-  - Weighted CrossEntropyLoss (handles class imbalance)
+  - FocalLoss / WeightedCrossEntropyLoss (handles class imbalance)
+  - MixUp + CutMix (randomly chosen per batch)
   - CosineAnnealingLR scheduler
-  - Early stopping on validation loss
-  - Best-model checkpointing
+  - Early stopping on validation macro-F1 (not val_loss)
+  - Best-model checkpointing: saved on highest val macro-F1
   - MPS (Apple Silicon) compatible
 """
 
@@ -12,10 +13,12 @@ import time
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from sklearn.metrics import f1_score
 
 
 class Trainer:
@@ -25,28 +28,38 @@ class Trainer:
     Args:
         model         : PyTorch model.
         device        : torch.device.
-        learning_rate : Initial LR (default 1e-3).
-        weight_decay  : AdamW weight decay (default 1e-5).
+        learning_rate : Initial LR.
+        weight_decay  : AdamW weight decay.
         class_weights : Optional 1-D tensor for weighted loss (shape: num_classes).
-                        Pass compute_class_weights(train_df) from data_handler.
+        criterion     : Optional pre-built loss module (overrides class_weights).
+        mixup_alpha   : Beta distribution alpha for MixUp. 0.0 = disabled.
+        cutmix_alpha  : Beta distribution alpha for CutMix. 0.0 = disabled.
+                        When both > 0, one is chosen randomly per batch.
     """
 
     def __init__(
         self,
         model:          nn.Module,
         device:         torch.device,
-        learning_rate:  float ,
-        weight_decay:   float ,
+        learning_rate:  float,
+        weight_decay:   float,
         class_weights:  Optional[torch.Tensor] = None,
+        criterion:      Optional[nn.Module]    = None,
+        mixup_alpha:    float = 0.0,
+        cutmix_alpha:   float = 0.0,
     ) -> None:
-        self.model  = model
-        self.device = device
+        self.model        = model
+        self.device       = device
+        self.mixup_alpha  = mixup_alpha
+        self.cutmix_alpha = cutmix_alpha
 
-        # Weighted loss counteracts class imbalance.
-        w = class_weights.to(device) if class_weights is not None else None
-        self.criterion = nn.CrossEntropyLoss(weight=w)
+        if criterion is not None:
+            self.criterion = criterion
+        else:
+            w = class_weights.to(device) if class_weights is not None else None
+            self.criterion = nn.CrossEntropyLoss(weight=w)
 
-        # AdamW is generally preferred over Adam for regularization.
+        # AdamW: better regularization than plain Adam
         self.optimizer = AdamW(
             model.parameters(),
             lr=learning_rate,
@@ -54,20 +67,80 @@ class Trainer:
         )
 
         self.history: dict[str, list[float]] = {
-            "train_loss": [], "val_loss": [],
-            "train_acc":  [], "val_acc":  [],
-            "lr":         [],
+            "train_loss":    [],
+            "val_loss":      [],
+            "train_acc":     [],
+            "val_acc":       [],
+            "val_macro_f1":  [],   # primary checkpoint metric
+            "lr":            [],
         }
-        self._best_val_loss    = float("inf")
-        self._patience_counter = 0
+        # Save on macro-F1 (higher is better) instead of val_loss.
+        # This prevents CMD-biased checkpoints where minority classes are ignored.
+        self.best_val_f1      = -1.0
+        self.patience_counter = 0
 
-    #  Single-epoch helpers 
+    #  MixUp / CutMix helpers
+
+    def mixup(
+        self, images: torch.Tensor, labels: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, float]:
+        """MixUp: linear interpolation of image pairs and their labels."""
+        lam = float(np.random.beta(self.mixup_alpha, self.mixup_alpha))
+        idx = torch.randperm(images.size(0), device=self.device)
+        mixed = lam * images + (1.0 - lam) * images[idx]
+        return mixed, labels, labels[idx], lam
+
+    def cutmix(
+        self, images: torch.Tensor, labels: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, float]:
+        """CutMix: paste a rectangular patch from one image into another."""
+        lam = float(np.random.beta(self.cutmix_alpha, self.cutmix_alpha))
+        idx = torch.randperm(images.size(0), device=self.device)
+
+        _, _, H, W = images.shape
+        cut_rat = np.sqrt(1.0 - lam)
+        cut_w   = int(W * cut_rat)
+        cut_h   = int(H * cut_rat)
+        cx      = np.random.randint(W)
+        cy      = np.random.randint(H)
+        x1 = np.clip(cx - cut_w // 2, 0, W)
+        y1 = np.clip(cy - cut_h // 2, 0, H)
+        x2 = np.clip(cx + cut_w // 2, 0, W)
+        y2 = np.clip(cy + cut_h // 2, 0, H)
+
+        mixed = images.clone()
+        mixed[:, :, y1:y2, x1:x2] = images[idx, :, y1:y2, x1:x2]
+        # Adjust lam to reflect actual patch area
+        lam = 1.0 - (y2 - y1) * (x2 - x1) / (H * W)
+        return mixed, labels, labels[idx], lam
+
+    def apply_mix(
+        self, images: torch.Tensor, labels: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, float]:
+        """Randomly choose between MixUp and CutMix (or the enabled one)."""
+        both = self.mixup_alpha > 0 and self.cutmix_alpha > 0
+        use_cutmix = (self.cutmix_alpha > 0 and self.mixup_alpha == 0) or (both and np.random.random() < 0.5)
+        return self._cutmix(images, labels) if use_cutmix else self._mixup(images, labels)
+
+    #  Single-epoch helpers
 
     def run_epoch(
         self, loader: torch.utils.data.DataLoader, training: bool
-    ) -> tuple[float, float]:
+    ) -> tuple[float, float, float]:
+        """
+        Run one epoch; return (avg_loss, accuracy, macro_f1).
+
+        macro_f1 is computed for validation only (not training — too slow and
+        not needed for checkpointing).  Returns -1.0 during training.
+
+        When MixUp/CutMix is enabled during training, accuracy is computed
+        against the dominant label (labels_a) as an approximation.
+        """
         self.model.train(training)
         total_loss, correct, n = 0.0, 0, 0
+        all_preds, all_labels = [], []
+
+        use_mix = training and (self.mixup_alpha > 0 or self.cutmix_alpha > 0)
 
         ctx = torch.enable_grad() if training else torch.no_grad()
         with ctx:
@@ -77,51 +150,80 @@ class Trainer:
                 if training:
                     self.optimizer.zero_grad()
 
-                outputs = self.model(images)
-                loss    = self.criterion(outputs, labels)
+                if use_mix:
+                    images, labels_a, labels_b, lam = self._apply_mix(images, labels)
+                    outputs = self.model(images)
+                    # Mixed loss: weighted combination of two cross-entropy terms
+                    loss = lam * self.criterion(outputs, labels_a) + (1.0 - lam) * self.criterion(outputs, labels_b)
+                    preds   = outputs.argmax(1)
+                    # Approx accuracy: weighted vote of both labels
+                    correct += (
+                        lam       * (preds == labels_a).float() +
+                        (1 - lam) * (preds == labels_b).float()
+                    ).sum().item()
+                else:
+                    outputs = self.model(images)
+                    loss    = self.criterion(outputs, labels)
+                    preds   = outputs.argmax(1)
+                    correct += (preds == labels).sum().item()
 
                 if training:
                     loss.backward()
-                    # Gradient clipping improves MPS stability.
+                    # Gradient clipping improves MPS/CUDA stability
                     nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                     self.optimizer.step()
 
                 total_loss += loss.item() * images.size(0)
-                correct    += (outputs.argmax(1) == labels).sum().item()
                 n          += labels.size(0)
 
-        return total_loss / n, correct / n
+                if not training:
+                    all_preds.extend(preds.cpu().tolist())
+                    all_labels.extend(labels.cpu().tolist())
 
-    #  Full training loop 
+        avg_loss = total_loss / n
+        accuracy = correct / n
+        # Macro-F1 treats all classes equally — critical for imbalanced Cassava dataset
+        macro_f1 = (
+            f1_score(all_labels, all_preds, average="macro", zero_division=0)
+            if not training
+            else -1.0
+        )
+        return avg_loss, accuracy, macro_f1
+
+    #  Full training loop
 
     def train(
         self,
         train_loader:   torch.utils.data.DataLoader,
         val_loader:     torch.utils.data.DataLoader,
-        num_epochs:     int ,
-        patience:       int ,
+        num_epochs:     int,
+        patience:       int,
         model_save_dir: str,
     ) -> dict[str, list[float]]:
         """
-        Train with early stopping and cosine LR annealing.
+        Train with early stopping (on macro-F1) and cosine LR annealing.
+
+        Best model checkpoint = highest validation macro-F1, not lowest loss.
+        Macro-F1 balances all five cassava classes equally, preventing the model
+        from collapsing to predict only CMD (the 61% majority class).
 
         Args:
             train_loader   : Training DataLoader.
             val_loader     : Validation DataLoader.
             num_epochs     : Maximum epochs.
-            patience       : Early-stopping patience (epochs without improvement).
+            patience       : Early-stopping patience (epochs without macro-F1 gain).
             model_save_dir : Directory to save best_model.pth.
 
         Returns:
-            history dict with train/val loss & accuracy per epoch, plus LR.
+            history dict: train/val loss, accuracy, val_macro_f1, lr per epoch.
         """
         Path(model_save_dir).mkdir(parents=True, exist_ok=True)
         scheduler = CosineAnnealingLR(self.optimizer, T_max=num_epochs, eta_min=1e-6)
 
         t0 = time.time()
         for epoch in range(1, num_epochs + 1):
-            train_loss, train_acc = self._run_epoch(train_loader, training=True)
-            val_loss,   val_acc   = self._run_epoch(val_loader,   training=False)
+            train_loss, train_acc, _            = self.run_epoch(train_loader, training=True)
+            val_loss,   val_acc,   val_macro_f1 = self.run_epoch(val_loader,   training=False)
             scheduler.step()
             lr = self.optimizer.param_groups[0]["lr"]
 
@@ -129,26 +231,27 @@ class Trainer:
             self.history["val_loss"].append(val_loss)
             self.history["train_acc"].append(train_acc)
             self.history["val_acc"].append(val_acc)
+            self.history["val_macro_f1"].append(val_macro_f1)
             self.history["lr"].append(lr)
 
             print(
                 f"Epoch {epoch:3d}/{num_epochs} | "
                 f"Train loss {train_loss:.4f}  acc {train_acc:.4f} | "
-                f"Val loss {val_loss:.4f}  acc {val_acc:.4f} | "
+                f"Val loss {val_loss:.4f}  acc {val_acc:.4f}  macro-F1 {val_macro_f1:.4f} | "
                 f"LR {lr:.2e}"
             )
 
-            #  Checkpoint & early stopping 
-            if val_loss < self._best_val_loss:
-                self._best_val_loss    = val_loss
-                self._patience_counter = 0
+            #  Checkpoint on macro-F1 (early stopping also uses macro-F1)
+            if val_macro_f1 > self.best_val_f1:
+                self.best_val_f1      = val_macro_f1
+                self.patience_counter = 0
                 ckpt = Path(model_save_dir) / "best_model.pth"
                 torch.save(self.model.state_dict(), ckpt)
-                print(f"  ✓ Best model saved → {ckpt}")
+                print(f"  ✓ Best model saved (macro-F1={val_macro_f1:.4f}) → {ckpt}")
             else:
-                self._patience_counter += 1
-                if self._patience_counter >= patience:
-                    print(f"\nEarly stopping triggered at epoch {epoch}.")
+                self.patience_counter += 1
+                if self.patience_counter >= patience:
+                    print(f"\nEarly stopping at epoch {epoch} — no macro-F1 gain for {patience} epochs.")
                     break
 
         elapsed = time.time() - t0

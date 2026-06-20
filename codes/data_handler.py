@@ -44,7 +44,7 @@ IMAGENET_STD  = (0.229, 0.224, 0.225)
 #  Label-map loader 
 
 def load_label_map(dataset_dir: str | Path) -> dict[int, str]:
-    """Load the Kaggle label JSON if present, else fall back to CLASS_NAMES."""
+    """Load the label map JSON if present, else fall back to CLASS_NAMES."""
     path = Path(dataset_dir) / "label_num_to_disease_map.json"
     if not path.exists():
         return CLASS_NAMES
@@ -74,6 +74,7 @@ def get_transforms(image_size: int = 224, augment: bool = True) -> A.Compose:
             A.Rotate(limit=25, border_mode=0, p=0.5),
             A.RandomBrightnessContrast(p=0.3),
             A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.5),
+            A.RandomGamma(gamma_limit=(80, 120), p=0.3),   # field-lighting variation
             A.Affine(translate_percent=0.05, scale=(0.90, 1.10), rotate=(-15, 15), p=0.5),
             A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
             ToTensorV2(),
@@ -105,6 +106,7 @@ def get_robust_transforms(image_size: int = 224 ) -> A.Compose:
         A.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1, p=0.7),
         A.Affine(translate_percent=0.08, scale=(0.85, 1.15), rotate=(-20, 20), p=0.5),
         A.GaussianBlur(blur_limit=(3, 7), p=0.4),
+        A.ISONoise(color_shift=(0.01, 0.05), intensity=(0.1, 0.5), p=0.3),  # cheap-camera sensor noise
         A.ImageCompression(quality_range=(60, 95), p=0.3),
         A.CoarseDropout(
             num_holes_range=(4, 8),

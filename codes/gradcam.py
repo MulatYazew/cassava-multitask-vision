@@ -1,25 +1,16 @@
 """
 AgroVision Grad-CAM
-====================
-Grad-CAM (Selvaraju et al., 2017) for the three backbones defined in
-model.py (ResNet-50, EfficientNet-V2-S, ConvNeXt-Tiny).
 
-Reuses:
-- model.py        -> model architecture / REGISTRY (no redefinition)
-- data_handler.py -> CLASS_NAMES, IMAGENET_MEAN/STD, get_transforms (no redefinition)
-- config.py       -> NUM_CLASSES, INPUT_SIZE
+Gradient-weighted Class Activation Mapping for the three backbones in model.py
+(ResNet-50, EfficientNet-V2-S, Swin-Tiny).
 
-Usage
------
     from codes.gradcam import GradCAM, overlay_heatmap, show_gradcam
 
     cam = GradCAM(model, model_name=MODEL_NAME)
-    heatmap, pred_class = cam(input_tensor)          # input_tensor: (1, C, H, W)
+    heatmap, pred_class = cam(input_tensor)   # input_tensor: (1, C, H, W)
     overlay = overlay_heatmap(original_rgb_image, heatmap)
 
-    # or, end-to-end on a raw image array:
-    show_gradcam(model, model_name=MODEL_NAME, image=rgb_array,
-                  image_size=INPUT_SIZE, class_names=CLASS_NAMES, device=device)
+Supported model_name values: resnet50, efficientnet_v2_s, swin_tiny.
 """
 
 from typing import Optional
@@ -39,21 +30,30 @@ from .data_handler import IMAGENET_MEAN, IMAGENET_STD, get_transforms, CLASS_NAM
 def _get_target_layer(model: nn.Module, model_name: str) -> nn.Module:
     """
     Return the last convolutional block to hook, per architecture.
-    `model` is one of ResNet50Model / EfficientNetV2SModel / ConvNeXtTinyModel
-    from model.py, all wrapping `self.backbone`.
+
+      resnet50          — backbone[7][-1] : last Bottleneck in layer4
+      efficientnet_v2_s — backbone[-1]    : last MBConv block in base.features
+      swin_tiny         — model.permute   : already (B, 768, H, W); backbone[-1]
+                                            would give (B, H, W, C) which breaks GAP
     """
+    if model_name == "swin_tiny":
+        # model.permute converts (B, H, W, 768) → (B, 768, H, W).
+        # Hooking here keeps activations/gradients in CAM-compatible (B, C, H, W) order.
+        return model.permute
+
     backbone = model.backbone
 
     if model_name == "resnet50":
-        return backbone.layer4[-1]
+        # backbone is nn.Sequential; layer4 sits at index 7.
+        return backbone[7][-1]
+
     if model_name == "efficientnet_v2_s":
-        return backbone.features[-1]
-    if model_name == "convnext_tiny":
-        return backbone.features[-1][-1]
+        # backbone IS base.features (Sequential of MBConv stages).
+        return backbone[-1]
 
     raise ValueError(
         f"Unknown model_name '{model_name}'. "
-        f"Expected one of: resnet50, efficientnet_v2_s, convnext_tiny."
+        f"Expected one of: resnet50, efficientnet_v2_s, swin_tiny."
     )
 
 
@@ -64,10 +64,9 @@ class GradCAM:
     Grad-CAM wrapper for the AgroVision models.
 
     Args:
-        model      : trained nn.Module (ResNet50Model / EfficientNetV2SModel / ConvNeXtTinyModel).
-        model_name : one of 'resnet50' | 'efficientnet_v2_s' | 'convnext_tiny'
-                     (matches MODEL_ARCHITECTURE in config.py / model.REGISTRY keys).
-        target_layer : optional explicit layer to hook; auto-detected if None.
+        model        : trained nn.Module (one of the three AgroVision backbones).
+        model_name   : 'resnet50' | 'efficientnet_v2_s' | 'swin_tiny'
+        target_layer : explicit layer to hook; auto-detected from model_name if None.
     """
 
     def __init__(self, model: nn.Module, model_name: str, target_layer: Optional[nn.Module] = None) -> None:
@@ -195,7 +194,7 @@ def show_gradcam(
 
     Args:
         model       : trained model (already on `device`, in eval mode).
-        model_name  : 'resnet50' | 'efficientnet_v2_s' | 'convnext_tiny'.
+        model_name  : 'resnet50' | 'efficientnet_v2_s' | 'swin_tiny'.
         image       : (H, W, 3) RGB uint8 array.
         image_size  : INPUT_SIZE from config.py.
         class_names : CLASS_NAMES dict from data_handler (default used if None).

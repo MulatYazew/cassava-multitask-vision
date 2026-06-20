@@ -1,40 +1,13 @@
 """
 AgroVision Africa — Loss Functions for Class Imbalance
-=======================================================
-Three complementary strategies address the severe class imbalance
-in the Cassava dataset (CMD ≈ 61.5 %, CBB ≈ 5.1 %):
 
-  1. ``WeightedCrossEntropyLoss`` — standard CE with per-class
-     inverse-frequency weights.  Simple, no extra hyperparameters.
+Strategies for the severe class imbalance in the Cassava dataset (CMD ~61.5%, CBB ~5.1%):
+  - WeightedCrossEntropyLoss : standard CE with per-class inverse-frequency weights
+  - FocalLoss                : down-weights easy examples; focuses on hard minority cases
+  - WeightedRandomSampler    : lives in data_handler.py; re-balances mini-batch composition
 
-  2. ``FocalLoss`` — down-weights easy / well-classified examples
-     so training focuses on hard minority cases, especially CBB.
-     Combines class-frequency correction (alpha) with sample-difficulty
-     correction (gamma).
-
-  3. ``WeightedRandomSampler`` — lives in ``codes/data_handler.py``;
-     re-balances mini-batch composition at the DataLoader level.
-
-⚠️  IMPORTANT — avoid double-stacking corrections:
-    If a ``WeightedRandomSampler`` is active in the DataLoader, pass
-    ``alpha=None`` (and ``weight=None``) into the loss.  The sampler
-    already equalises class frequency per batch; adding inverse-frequency
-    weights on top amplifies minority classes *twice*, causing loss spikes
-    or unstable training in early epochs when most predictions are "hard"
-    and the (1-p_t)^gamma focal term is large.
-
-    Choose ONE place to correct for class frequency:
-
-      ┌────────────────────┬───────────────────────────────────────────────┐
-      │ Sampler active     │ alpha=None, gamma free to tune                │
-      │ No sampler         │ pass alpha/weight = compute_class_weights(…)  │
-      └────────────────────┴───────────────────────────────────────────────┘
-
-References:
-    Lin et al. (2017). "Focal Loss for Dense Object Detection."
-        https://arxiv.org/abs/1708.02002
-    Cui et al. (2019). "Class-Balanced Loss Based on Effective Number of Samples."
-        https://arxiv.org/abs/1901.05555
+Avoid double-stacking corrections: if a WeightedRandomSampler is active, pass alpha=None
+into the loss. Use the sampler OR class weights in the loss — not both.
 """
 
 from __future__ import annotations
@@ -48,7 +21,7 @@ import torch.nn.functional as F
 
 class WeightedCrossEntropyLoss(nn.Module):
     """
-    Standard cross-entropy with per-class inverse-frequency weights.
+    Standard cross-entropy with per-class inverse-frequency weights and optional label smoothing.
 
     Advantages:
         Simple, no extra hyperparameters, numerically stable, well-understood.
@@ -58,27 +31,31 @@ class WeightedCrossEntropyLoss(nn.Module):
         hard from easy samples.
 
     Args:
-        weight    : Per-class weight tensor of shape ``(num_classes,)``.
-                    Typically ``compute_class_weights(train_df).to(device)``.
-                    ``None`` → all classes weighted equally (plain CE).
-        reduction : ``'mean'`` (default) or ``'sum'``.
+        weight          : Per-class weight tensor of shape ``(num_classes,)``.
+                          Typically ``compute_class_weights(train_df).to(device)``.
+                          ``None`` → all classes weighted equally (plain CE).
+        label_smoothing : Label smoothing ε (default 0.0 = off).
+                          0.1 is recommended for the noisy Cassava dataset labels.
+        reduction       : ``'mean'`` (default) or ``'sum'``.
 
     Usage::
 
         weights   = compute_class_weights(train_df).to(device)
-        criterion = WeightedCrossEntropyLoss(weight=weights)
+        criterion = WeightedCrossEntropyLoss(weight=weights, label_smoothing=0.1)
         loss      = criterion(logits, labels)
     """
 
     def __init__(
         self,
         weight: torch.Tensor | None = None,
+        label_smoothing: float = 0.0,
         reduction: str = "mean",
     ) -> None:
         super().__init__()
         # register_buffer moves the tensor with .to(device) automatically
         # and saves it in the state_dict for reproducibility.
         self.register_buffer("weight", weight)
+        self.label_smoothing = label_smoothing
         self.reduction = reduction
 
     def forward(
@@ -90,6 +67,7 @@ class WeightedCrossEntropyLoss(nn.Module):
             logits,
             targets,
             weight=self.weight,
+            label_smoothing=self.label_smoothing,
             reduction=self.reduction,
         )
 
@@ -98,7 +76,7 @@ class WeightedCrossEntropyLoss(nn.Module):
 
 class FocalLoss(nn.Module):
     """
-    Focal Loss (Lin et al., 2017).
+    Focal Loss.
 
     Down-weights easy / well-classified examples so the training signal
     is dominated by hard minority cases (especially CBB with only ~5 % of
@@ -144,11 +122,13 @@ class FocalLoss(nn.Module):
         self,
         alpha: torch.Tensor | None = None,
         gamma: float = 2.0,
+        label_smoothing: float = 0.0,
         reduction: str = "mean",
     ) -> None:
         super().__init__()
         self.register_buffer("alpha", alpha)  # moves with .to(device)
         self.gamma = gamma
+        self.label_smoothing = label_smoothing
         self.reduction = reduction
 
     def forward(
@@ -156,11 +136,12 @@ class FocalLoss(nn.Module):
         logits: torch.Tensor,
         targets: torch.Tensor,
     ) -> torch.Tensor:
-        # Per-sample CE (possibly class-weighted) — shape (B,)
+        # Per-sample CE (possibly class-weighted + label-smoothed) — shape (B,)
         ce_loss = F.cross_entropy(
             logits,
             targets,
             weight=self.alpha,
+            label_smoothing=self.label_smoothing,
             reduction="none",
         )
         # p_t = probability assigned to the correct class
@@ -181,35 +162,37 @@ def build_criterion(
     loss_type: str,
     class_weights: torch.Tensor | None,
     gamma: float = 2.0,
+    label_smoothing: float = 0.0,
 ) -> nn.Module:
     """
     Factory — return a configured loss module by name.
 
     Args:
-        loss_type     : ``'focal'`` or ``'weighted_ce'``.
-        class_weights : Output of ``compute_class_weights(train_df).to(device)``.
-                        Pass ``None`` when a ``WeightedRandomSampler`` is active
-                        to avoid double-stacking frequency corrections.
-        gamma         : Focal loss focusing parameter (ignored for ``weighted_ce``).
+        loss_type       : ``'focal'`` or ``'weighted_ce'``.
+        class_weights   : Output of ``compute_class_weights(train_df).to(device)``.
+                          Pass ``None`` when a ``WeightedRandomSampler`` is active
+                          to avoid double-stacking frequency corrections.
+        gamma           : Focal loss focusing parameter (ignored for ``weighted_ce``).
+        label_smoothing : Smoothing ε; 0.1 recommended for noisy cassava labels.
 
     Returns:
         Configured loss module with weight buffer already registered.
 
     Example::
 
-        # Sampler active — no alpha in loss
-        criterion = build_criterion('focal', class_weights=None, gamma=2.0)
+        # Sampler active — no alpha, with label smoothing
+        criterion = build_criterion('focal', class_weights=None, gamma=2.0, label_smoothing=0.1)
 
         # No sampler — pass weights into loss
-        criterion = build_criterion('focal', class_weights=w.to(device), gamma=2.0)
+        criterion = build_criterion('focal', class_weights=w.to(device), gamma=2.0, label_smoothing=0.1)
 
-        # Plain weighted CE
-        criterion = build_criterion('weighted_ce', class_weights=w.to(device))
+        # Plain weighted CE with label smoothing
+        criterion = build_criterion('weighted_ce', class_weights=w.to(device), label_smoothing=0.1)
     """
     if loss_type == "focal":
-        return FocalLoss(alpha=class_weights, gamma=gamma)
+        return FocalLoss(alpha=class_weights, gamma=gamma, label_smoothing=label_smoothing)
     if loss_type == "weighted_ce":
-        return WeightedCrossEntropyLoss(weight=class_weights)
+        return WeightedCrossEntropyLoss(weight=class_weights, label_smoothing=label_smoothing)
     raise ValueError(
         f"Unknown loss_type '{loss_type}'. "
         "Choose from: 'focal', 'weighted_ce'."
