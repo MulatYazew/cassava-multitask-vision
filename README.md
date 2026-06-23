@@ -14,7 +14,7 @@ Silicon (MPS) but falls back to CUDA/CPU automatically.
 │   ├── utils.py            # seeding, device detection, helpers
 │   ├── outlier_handler.py  # 3-stage outlier/QA pipeline
 │   ├── data_handler.py     # Dataset, augmentations, class weights, sampler, per-class F1
-│   ├── model.py            # ResNet50 / EfficientNetV2-S / ConvNeXt-Tiny factory
+│   ├── model.py            # CassavaCNN / EfficientNetV2-S / Swin-Tiny factory
 │   ├── train.py             # Trainer: training loop, early stopping, checkpointing
 │   └── evaluate.py          # Evaluator: metrics, confusion matrix, classification report
 ├── notebooks/
@@ -61,7 +61,7 @@ Place the Kaggle Cassava Leaf Disease dataset under
    - Stratified 80/10/10 train/val/test split.
    - DataLoaders with albumentations augmentation (heavier pipeline for
      minority classes) and a class-weighted sampler.
-   - Model selection (ResNet-50 / EfficientNet-V2-S / ConvNeXt-Tiny).
+   - Model selection (CassavaCNN / EfficientNet-V2-S / Swin-Tiny).
    - Training with weighted CrossEntropyLoss, AdamW, cosine LR
      annealing, and early stopping on validation loss; best checkpoint
      saved to `models/best_model.pth`.

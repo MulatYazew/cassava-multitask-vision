@@ -1,17 +1,15 @@
 """
 AgroVision Africa — Model Definitions
 
-Three backbone options for cassava leaf disease classification:
-  - ResNet50Model        : classical CNN baseline
-  - EfficientNetV2SModel : proposed high-performance model
+Backbone options for cassava leaf disease classification:
+  - CassavaCNNModel      : custom CNN with standard 3×3 residual blocks (~9.3 M params)
+  - EfficientNetV2SModel : pretrained high-performance model
   - SwinTinyModel        : Vision Transformer with LoRA-adapted attention
 
 All share the BaseModel interface (freeze/unfreeze backbone, model_info).
-Recommended: EfficientNetV2S + SwinTiny ensemble for best results.
 
     from codes.model import build_model
-    model = build_model("efficientnet_v2_s", num_classes=5).to(device)
-    model.unfreeze_backbone()
+    model = build_model("cassava_cnn", num_classes=5).to(device)
 """
 
 from __future__ import annotations
@@ -75,31 +73,155 @@ class BaseModel(ABC, nn.Module):
         }
 
 
-# -- ResNet-50 ---------------------------------------------------------------
+# -- CassavaCNN building blocks ----------------------------------------------
 
-class ResNet50Model(BaseModel):
-    """ResNet-50 baseline. Two-phase fine-tuning: head-only then full network."""
+class ConvBNReLU(nn.Sequential):
+    """Conv2d + BatchNorm2d + ReLU."""
 
-    NAME = "resnet50"
-
-    def build(self) -> None:
-        base = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
-        self.backbone = nn.Sequential(
-            base.conv1, base.bn1, base.relu, base.maxpool,
-            base.layer1, base.layer2, base.layer3, base.layer4,
-            base.avgpool,
+    def __init__(self, in_c: int, out_c: int, kernel: int = 3, stride: int = 1) -> None:
+        super().__init__(
+            nn.Conv2d(in_c, out_c, kernel, stride=stride, padding=kernel // 2, bias=False),
+            nn.BatchNorm2d(out_c),
+            nn.ReLU(inplace=True),
         )
-        self.flatten = nn.Flatten()
-        self.head = make_head(base.fc.in_features, self.num_classes, self.dropout)
+
+
+class SEBlock(nn.Module):
+    """
+    Squeeze-and-Excitation channel attention (r=16).
+
+    Recalibrates channel responses so the network can focus on subtle
+    symptom patterns of minority classes (CBB 5.1%, CBSD 10.2%, CGM 11.2%)
+    rather than overfitting to the dominant CMD texture (61.5%).
+    """
+
+    def __init__(self, channels: int, reduction: int = 16) -> None:
+        super().__init__()
+        squeezed = max(4, channels // reduction)
+        self.pool    = nn.AdaptiveAvgPool2d(1)
+        self.fc1     = nn.Linear(channels, squeezed, bias=False)
+        self.fc2     = nn.Linear(squeezed, channels, bias=False)
+        self.relu    = nn.ReLU(inplace=True)
+        self.sigmoid = nn.Sigmoid()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.head(self.flatten(self.backbone(x)))
+        s = self.pool(x).flatten(1)
+        s = self.sigmoid(self.fc2(self.relu(self.fc1(s))))
+        return x * s.unsqueeze(-1).unsqueeze(-1)
+
+
+class ResBlock(nn.Module):
+    """
+    Standard two-conv residual block.
+
+      Conv(3×3) → BN → ReLU → Conv(3×3) → BN → SE (optional) → +skip → ReLU
+
+    Skip connection uses a 1×1 conv when channels or stride changes.
+    """
+
+    def __init__(
+        self,
+        in_c:   int,
+        out_c:  int,
+        stride: int  = 1,
+        use_se: bool = False,
+    ) -> None:
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_c,  out_c, 3, stride=stride, padding=1, bias=False),
+            nn.BatchNorm2d(out_c),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_c, out_c, 3, stride=1,      padding=1, bias=False),
+            nn.BatchNorm2d(out_c),
+        )
+        self.se   = SEBlock(out_c) if use_se else nn.Identity()
+        self.skip = (
+            nn.Sequential(
+                nn.Conv2d(in_c, out_c, 1, stride=stride, bias=False),
+                nn.BatchNorm2d(out_c),
+            )
+            if (stride != 1 or in_c != out_c)
+            else nn.Identity()
+        )
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = self.se(self.conv(x))
+        return self.relu(out + self.skip(x))
+
+
+def make_stage(
+    in_c:       int,
+    out_c:      int,
+    num_blocks: int,
+    stride:     int  = 2,
+    use_se:     bool = False,
+) -> nn.Sequential:
+    """Stack of ResBlocks: first block may downsample, rest keep resolution."""
+    blocks = [ResBlock(in_c, out_c, stride=stride, use_se=use_se)]
+    for _ in range(1, num_blocks):
+        blocks.append(ResBlock(out_c, out_c, stride=1, use_se=use_se))
+    return nn.Sequential(*blocks)
+
+
+# -- CassavaCNN --------------------------------------------------------------
+
+class CassavaCNNModel(BaseModel):
+    """
+    Custom CNN for cassava disease classification.
+
+    Built entirely from standard 3×3 conv residual blocks — no pretrained
+    weights, no depthwise separable convolutions.
+
+    Class-imbalance strategy (CMD 61.5%, CBB 5.1%):
+      Squeeze-and-Excitation blocks in stages 3 & 4 recalibrate per-channel
+      importance, counteracting the network's tendency to over-represent the
+      dominant CMD texture and ignore subtle minority-class symptoms.
+
+    Architecture (224×224 input):
+      Stem  3-conv entry        →  64 ch @ 56×56
+      Stage 1  3× ResBlock      →  64 ch @ 56×56
+      Stage 2  3× ResBlock      → 128 ch @ 28×28
+      Stage 3  4× ResBlock + SE → 256 ch @ 14×14
+      Stage 4  3× ResBlock + SE → 256 ch @  7×7
+      GAP  → 256-d vector
+      Head: Dropout → FC-256 → FC-5
+
+    ~9.3 M parameters. Trained from scratch — freeze_backbone() is a no-op.
+    """
+
+    NAME = "cassava_cnn"
+
+    def build(self) -> None:
+        self.stem = nn.Sequential(
+            ConvBNReLU(3,  32, 3, stride=2),   # 224 → 112
+            ConvBNReLU(32, 32, 3, stride=1),   # 112 → 112
+            ConvBNReLU(32, 64, 3, stride=2),   # 112 →  56
+        )
+        self.stage1 = make_stage(64,  64,  3, stride=1, use_se=False)
+        self.stage2 = make_stage(64,  128, 3, stride=2, use_se=False)
+        self.stage3 = make_stage(128, 256, 4, stride=2, use_se=True)
+        self.stage4 = make_stage(256, 256, 3, stride=2, use_se=True)
+        self.pool   = nn.AdaptiveAvgPool2d(1)
+        self.flat   = nn.Flatten()
+        self.head   = make_head(256, self.num_classes, self.dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.stem(x)
+        x = self.stage1(x)
+        x = self.stage2(x)
+        x = self.stage3(x)
+        x = self.stage4(x)
+        x = self.pool(x)
+        x = self.flat(x)
+        return self.head(x)
 
     def freeze_backbone(self) -> None:
-        for p in self.backbone.parameters(): p.requires_grad = False
+        pass  # from-scratch model: no pretrained backbone to freeze
 
     def unfreeze_backbone(self) -> None:
-        for p in self.backbone.parameters(): p.requires_grad = True
+        for p in self.parameters():
+            p.requires_grad = True
 
 
 # -- EfficientNet-V2-S -------------------------------------------------------
@@ -276,7 +398,7 @@ class SwinTinyModel(BaseModel):
 # -- registry & factories ----------------------------------------------------
 
 MODEL_REGISTRY: dict[str, type[BaseModel]] = {
-    "resnet50":          ResNet50Model,
+    "cassava_cnn":       CassavaCNNModel,
     "efficientnet_v2_s": EfficientNetV2SModel,
     "swin_tiny":         SwinTinyModel,
 }
@@ -284,11 +406,14 @@ MODEL_REGISTRY: dict[str, type[BaseModel]] = {
 
 def build_model(name: str, num_classes: int = 5, dropout: float = 0.3, **kwargs) -> BaseModel:
     """
-    Instantiate a model with backbone frozen (Phase 1 ready).
-    Call model.unfreeze_backbone() to begin Phase 2.
+    Instantiate a model ready for training.
+
+    For pretrained models (efficientnet_v2_s, swin_tiny) the backbone starts
+    frozen (Phase 1). Call model.unfreeze_backbone() to begin Phase 2.
+    For cassava_cnn (from scratch) all params are trainable from the start.
 
     Args:
-        name        : 'resnet50' | 'efficientnet_v2_s' | 'swin_tiny'
+        name        : 'cassava_cnn' | 'efficientnet_v2_s' | 'swin_tiny'
         num_classes : output classes (default 5 for Cassava)
         dropout     : inner head dropout rate
         **kwargs    : forwarded to model constructor (e.g. lora_rank for swin_tiny)

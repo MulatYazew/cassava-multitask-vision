@@ -2,7 +2,7 @@
 AgroVision Grad-CAM
 
 Gradient-weighted Class Activation Mapping for the three backbones in model.py
-(ResNet-50, EfficientNet-V2-S, Swin-Tiny).
+(CassavaCNN, EfficientNet-V2-S, Swin-Tiny).
 
     from codes.gradcam import GradCAM, overlay_heatmap, show_gradcam
 
@@ -10,7 +10,7 @@ Gradient-weighted Class Activation Mapping for the three backbones in model.py
     heatmap, pred_class = cam(input_tensor)   # input_tensor: (1, C, H, W)
     overlay = overlay_heatmap(original_rgb_image, heatmap)
 
-Supported model_name values: resnet50, efficientnet_v2_s, swin_tiny.
+Supported model_name values: cassava_cnn, efficientnet_v2_s, swin_tiny.
 """
 
 from typing import Optional
@@ -27,25 +27,26 @@ from .data_handler import IMAGENET_MEAN, IMAGENET_STD, get_transforms, CLASS_NAM
 
 #  Target-layer lookup per backbone 
 
-def _get_target_layer(model: nn.Module, model_name: str) -> nn.Module:
+def get_target_layer(model: nn.Module, model_name: str) -> nn.Module:
     """
     Return the last convolutional block to hook, per architecture.
 
-      resnet50          — backbone[7][-1] : last Bottleneck in layer4
-      efficientnet_v2_s — backbone[-1]    : last MBConv block in base.features
-      swin_tiny         — model.permute   : already (B, 768, H, W); backbone[-1]
-                                            would give (B, H, W, C) which breaks GAP
+      cassava_cnn       — model.stage4[-1] : last ResBlock+SE in stage4
+      efficientnet_v2_s — backbone[-1]     : last MBConv block in base.features
+      swin_tiny         — model.permute    : already (B, 768, H, W); backbone[-1]
+                                             would give (B, H, W, C) which breaks GAP
     """
     if model_name == "swin_tiny":
         # model.permute converts (B, H, W, 768) → (B, 768, H, W).
         # Hooking here keeps activations/gradients in CAM-compatible (B, C, H, W) order.
         return model.permute
 
-    backbone = model.backbone
+    if model_name == "cassava_cnn":
+        # stage4 is an nn.Sequential of ResBlock+SE units; [-1] is the last one.
+        # Its output is a (B, 256, H, W) spatial feature map — ideal for CAM.
+        return model.stage4[-1]
 
-    if model_name == "resnet50":
-        # backbone is nn.Sequential; layer4 sits at index 7.
-        return backbone[7][-1]
+    backbone = model.backbone
 
     if model_name == "efficientnet_v2_s":
         # backbone IS base.features (Sequential of MBConv stages).
@@ -53,7 +54,7 @@ def _get_target_layer(model: nn.Module, model_name: str) -> nn.Module:
 
     raise ValueError(
         f"Unknown model_name '{model_name}'. "
-        f"Expected one of: resnet50, efficientnet_v2_s, swin_tiny."
+        f"Expected one of: cassava_cnn, efficientnet_v2_s, swin_tiny."
     )
 
 
@@ -65,7 +66,7 @@ class GradCAM:
 
     Args:
         model        : trained nn.Module (one of the three AgroVision backbones).
-        model_name   : 'resnet50' | 'efficientnet_v2_s' | 'swin_tiny'
+        model_name   : 'cassava_cnn' | 'efficientnet_v2_s' | 'swin_tiny'
         target_layer : explicit layer to hook; auto-detected from model_name if None.
     """
 
@@ -73,23 +74,23 @@ class GradCAM:
         self.model = model
         self.model.eval()
 
-        self.target_layer = target_layer or _get_target_layer(model, model_name)
+        self.target_layer = target_layer or get_target_layer(model, model_name)
 
-        self._activations: Optional[torch.Tensor] = None
-        self._gradients:   Optional[torch.Tensor] = None
+        self.stored_activations: Optional[torch.Tensor] = None
+        self.stored_gradients:   Optional[torch.Tensor] = None
 
-        self._fwd_handle = self.target_layer.register_forward_hook(self._save_activation)
-        self._bwd_handle = self.target_layer.register_full_backward_hook(self._save_gradient)
+        self.fwd_hook = self.target_layer.register_forward_hook(self.save_activation)
+        self.bwd_hook = self.target_layer.register_full_backward_hook(self.save_gradient)
 
-    #  Hooks 
+    #  Hooks
 
-    def _save_activation(self, module, inp, out) -> None:
-        self._activations = out.detach()
+    def save_activation(self, module, inp, out) -> None:
+        self.stored_activations = out.detach()
 
-    def _save_gradient(self, module, grad_in, grad_out) -> None:
-        self._gradients = grad_out[0].detach()
+    def save_gradient(self, module, grad_in, grad_out) -> None:
+        self.stored_gradients = grad_out[0].detach()
 
-    #  Core 
+    #  Core
 
     def __call__(self, input_tensor: torch.Tensor, class_idx: Optional[int] = None) -> tuple[np.ndarray, int]:
         """
@@ -113,8 +114,8 @@ class GradCAM:
         score = logits[0, class_idx]
         score.backward(retain_graph=False)
 
-        activations = self._activations[0]            # (C, h, w)
-        gradients   = self._gradients[0]               # (C, h, w)
+        activations = self.stored_activations[0]      # (C, h, w)
+        gradients   = self.stored_gradients[0]         # (C, h, w)
 
         # Global-average-pool the gradients -> per-channel importance weights.
         weights = gradients.mean(dim=(1, 2))           # (C,)
@@ -134,8 +135,8 @@ class GradCAM:
         return heatmap, class_idx
 
     def remove_hooks(self) -> None:
-        self._fwd_handle.remove()
-        self._bwd_handle.remove()
+        self.fwd_hook.remove()
+        self.bwd_hook.remove()
 
 
 #  Visualization helpers 
@@ -194,7 +195,7 @@ def show_gradcam(
 
     Args:
         model       : trained model (already on `device`, in eval mode).
-        model_name  : 'resnet50' | 'efficientnet_v2_s' | 'swin_tiny'.
+        model_name  : 'cassava_cnn' | 'efficientnet_v2_s' | 'swin_tiny'.
         image       : (H, W, 3) RGB uint8 array.
         image_size  : INPUT_SIZE from config.py.
         class_names : CLASS_NAMES dict from data_handler (default used if None).

@@ -36,7 +36,7 @@ class Evaluator:
 
     #  Inference
 
-    def _predict_probs(
+    def predict_probs(
         self, model: nn.Module, loader: torch.utils.data.DataLoader
     ) -> tuple[torch.Tensor, np.ndarray]:
         """Return softmax probability matrix (N, C) and true labels for a loader."""
@@ -52,7 +52,7 @@ class Evaluator:
 
     def predict(self, model: nn.Module, loader: torch.utils.data.DataLoader) -> tuple[np.ndarray, np.ndarray]:
         """Run model on loader; return (predictions, true_labels)."""
-        probs, labels = self._predict_probs(model, loader)
+        probs, labels = self.predict_probs(model, loader)
         return probs.argmax(1).numpy(), labels
 
     def predict_tta(
@@ -87,7 +87,7 @@ class Evaluator:
         true_labels: np.ndarray | None = None
 
         for i in range(n_augments):
-            probs, labels = self._predict_probs(model, loader)
+            probs, labels = self.predict_probs(model, loader)
             all_probs.append(probs)
             if true_labels is None:
                 true_labels = labels
@@ -132,13 +132,13 @@ class Evaluator:
                 # Reconstruct probs from TTA for averaging — rerun to get probs directly
                 model_probs: list[torch.Tensor] = []
                 for _ in range(n_augments):
-                    probs, lbl = self._predict_probs(model, loader)
+                    probs, lbl = self.predict_probs(model, loader)
                     model_probs.append(probs)
                     if true_labels is None:
                         true_labels = lbl
                 all_probs.append(torch.stack(model_probs).mean(0))
             else:
-                probs, labels = self._predict_probs(model, loader)
+                probs, labels = self.predict_probs(model, loader)
                 all_probs.append(probs)
                 if true_labels is None:
                     true_labels = labels

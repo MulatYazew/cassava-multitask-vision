@@ -27,8 +27,8 @@ VAL_SPLIT      = 0.10
 TEST_SPLIT     = 0.10
 
 #  Training
-BATCH_SIZE     = 32          # MPS performs well at 32; raise to 64 if RAM allows
-NUM_EPOCHS     = 50
+BATCH_SIZE     = 64          # MPS performs well at 
+NUM_EPOCHS     = 30
 WARMUP_LR      = 1e-3        # Phase 1: head-only warm-up (backbone frozen)
 LEARNING_RATE  = 1e-4        # Phase 2: full fine-tune — must be 10× lower than warm-up
 WEIGHT_DECAY   = 1e-5
@@ -38,7 +38,7 @@ NUM_WORKERS    = 4
 
 #  Model
 PRETRAINED     = True
-# Choices: "resnet50" | "efficientnet_v2_s" | "swin_tiny"
+# Choices: "cassava_cnn" | "efficientnet_v2_s" | "swin_tiny"
 MODEL_ARCHITECTURE = "efficientnet_v2_s"
 
 #  Augmentation
@@ -53,7 +53,7 @@ CUTMIX_ALPHA   = 1.0
 #  Loss function
 # gamma=3 focuses more aggressively on hard minority cases (CBB, CBSD, CGM)
 # than the default gamma=2. Appropriate when WeightedRandomSampler is active.
-FOCAL_GAMMA    = 3.0
+FOCAL_GAMMA    = 2.0
 
 # Label smoothing: helps regularize against noisy or mislabeled samples.
 LABEL_SMOOTHING = 0.1

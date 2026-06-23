@@ -1,14 +1,3 @@
-"""
-AgroVision Trainer
-Training loop with:
-  - FocalLoss / WeightedCrossEntropyLoss (handles class imbalance)
-  - MixUp + CutMix (randomly chosen per batch)
-  - CosineAnnealingLR scheduler
-  - Early stopping on validation macro-F1 (not val_loss)
-  - Best-model checkpointing: saved on highest val macro-F1
-  - MPS (Apple Silicon) compatible
-"""
-
 import time
 from pathlib import Path
 from typing import Optional
@@ -59,7 +48,6 @@ class Trainer:
             w = class_weights.to(device) if class_weights is not None else None
             self.criterion = nn.CrossEntropyLoss(weight=w)
 
-        # AdamW: better regularization than plain Adam
         self.optimizer = AdamW(
             model.parameters(),
             lr=learning_rate,
@@ -71,11 +59,9 @@ class Trainer:
             "val_loss":      [],
             "train_acc":     [],
             "val_acc":       [],
-            "val_macro_f1":  [],   # primary checkpoint metric
+            "val_macro_f1":  [],
             "lr":            [],
         }
-        # Save on macro-F1 (higher is better) instead of val_loss.
-        # This prevents CMD-biased checkpoints where minority classes are ignored.
         self.best_val_f1      = -1.0
         self.patience_counter = 0
 
@@ -120,7 +106,7 @@ class Trainer:
         """Randomly choose between MixUp and CutMix (or the enabled one)."""
         both = self.mixup_alpha > 0 and self.cutmix_alpha > 0
         use_cutmix = (self.cutmix_alpha > 0 and self.mixup_alpha == 0) or (both and np.random.random() < 0.5)
-        return self._cutmix(images, labels) if use_cutmix else self._mixup(images, labels)
+        return self.cutmix(images, labels) if use_cutmix else self.mixup(images, labels)
 
     #  Single-epoch helpers
 
@@ -151,7 +137,7 @@ class Trainer:
                     self.optimizer.zero_grad()
 
                 if use_mix:
-                    images, labels_a, labels_b, lam = self._apply_mix(images, labels)
+                    images, labels_a, labels_b, lam = self.apply_mix(images, labels)
                     outputs = self.model(images)
                     # Mixed loss: weighted combination of two cross-entropy terms
                     loss = lam * self.criterion(outputs, labels_a) + (1.0 - lam) * self.criterion(outputs, labels_b)
@@ -182,7 +168,6 @@ class Trainer:
 
         avg_loss = total_loss / n
         accuracy = correct / n
-        # Macro-F1 treats all classes equally — critical for imbalanced Cassava dataset
         macro_f1 = (
             f1_score(all_labels, all_preds, average="macro", zero_division=0)
             if not training
@@ -202,10 +187,6 @@ class Trainer:
     ) -> dict[str, list[float]]:
         """
         Train with early stopping (on macro-F1) and cosine LR annealing.
-
-        Best model checkpoint = highest validation macro-F1, not lowest loss.
-        Macro-F1 balances all five cassava classes equally, preventing the model
-        from collapsing to predict only CMD (the 61% majority class).
 
         Args:
             train_loader   : Training DataLoader.
@@ -241,7 +222,6 @@ class Trainer:
                 f"LR {lr:.2e}"
             )
 
-            #  Checkpoint on macro-F1 (early stopping also uses macro-F1)
             if val_macro_f1 > self.best_val_f1:
                 self.best_val_f1      = val_macro_f1
                 self.patience_counter = 0

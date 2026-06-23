@@ -23,13 +23,6 @@ class WeightedCrossEntropyLoss(nn.Module):
     """
     Standard cross-entropy with per-class inverse-frequency weights and optional label smoothing.
 
-    Advantages:
-        Simple, no extra hyperparameters, numerically stable, well-understood.
-
-    Disadvantages:
-        Treats all examples within a class equally — does not distinguish
-        hard from easy samples.
-
     Args:
         weight          : Per-class weight tensor of shape ``(num_classes,)``.
                           Typically ``compute_class_weights(train_df).to(device)``.
@@ -37,12 +30,6 @@ class WeightedCrossEntropyLoss(nn.Module):
         label_smoothing : Label smoothing ε (default 0.0 = off).
                           0.1 is recommended for the noisy Cassava dataset labels.
         reduction       : ``'mean'`` (default) or ``'sum'``.
-
-    Usage::
-
-        weights   = compute_class_weights(train_df).to(device)
-        criterion = WeightedCrossEntropyLoss(weight=weights, label_smoothing=0.1)
-        loss      = criterion(logits, labels)
     """
 
     def __init__(
@@ -52,8 +39,6 @@ class WeightedCrossEntropyLoss(nn.Module):
         reduction: str = "mean",
     ) -> None:
         super().__init__()
-        # register_buffer moves the tensor with .to(device) automatically
-        # and saves it in the state_dict for reproducibility.
         self.register_buffer("weight", weight)
         self.label_smoothing = label_smoothing
         self.reduction = reduction
@@ -100,22 +85,6 @@ class FocalLoss(nn.Module):
                     ``3.0`` → raise if CBB F1 stays below 0.75 after 10 epochs.
         reduction : ``'mean'`` (default) or ``'sum'``.
 
-    Advantages:
-        Simultaneously handles class imbalance (alpha) and sample difficulty
-        (gamma).  Hard minority examples receive the largest gradient signal.
-
-    Disadvantages:
-        Two hyperparameters to tune.  Poorly chosen gamma can cause
-        loss spikes on very small classes early in training.
-
-    Usage::
-
-        weights   = compute_class_weights(train_df).to(device)
-        criterion = FocalLoss(alpha=weights, gamma=2.0)
-        loss      = criterion(logits, labels)
-
-        # With WeightedRandomSampler already active — omit alpha:
-        criterion = FocalLoss(alpha=None, gamma=2.0)
     """
 
     def __init__(
@@ -126,7 +95,7 @@ class FocalLoss(nn.Module):
         reduction: str = "mean",
     ) -> None:
         super().__init__()
-        self.register_buffer("alpha", alpha)  # moves with .to(device)
+        self.register_buffer("alpha", alpha)
         self.gamma = gamma
         self.label_smoothing = label_smoothing
         self.reduction = reduction

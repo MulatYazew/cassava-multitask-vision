@@ -143,8 +143,8 @@ class CassavaDataset(Dataset):
         self.augment    = augment
 
         # Pre-build both pipelines once to avoid rebuilding per sample.
-        self._robust_tf   = get_robust_transforms(image_size)
-        self._standard_tf = get_transforms(image_size, augment=augment)
+        self.robust_tf   = get_robust_transforms(image_size)
+        self.standard_tf = get_transforms(image_size, augment=augment)
 
     def __len__(self) -> int:
         return len(self.df)
@@ -158,8 +158,7 @@ class CassavaDataset(Dataset):
             raise FileNotFoundError(f"Could not read: {self.images_dir / row['image_id']}")
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
-        # Route minority classes to the heavier pipeline during training.
-        tf = self._robust_tf if (self.augment and label in MINORITY_CLASSES) else self._standard_tf
+        tf = self.robust_tf if (self.augment and label in MINORITY_CLASSES) else self.standard_tf
         image = tf(image=image)["image"]
 
         return image, torch.tensor(label, dtype=torch.long)

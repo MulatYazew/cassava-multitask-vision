@@ -386,9 +386,11 @@ def plot_anomaly_score_distribution(scores: np.ndarray, thr: float = -0.15, save
 
 # Apply removals
 
-def apply_removals(df: pd.DataFrame, remove_ids, output_csv: str = "train_clean.csv") -> pd.DataFrame:
+def apply_removals(df: pd.DataFrame, remove_ids, output_csv: Optional[str] = None) -> pd.DataFrame:
     """remove_ids: an iterable of image_id values confirmed (after visual
     review) to be real outliers."""
+    if output_csv is None:
+        output_csv = os.path.join(RESULTS_DIR, "train_clean.csv")
     remove_ids = set(str(x) for x in remove_ids)
     before = len(df)
     final_df = df[~df["image_id"].astype(str).isin(remove_ids)].reset_index(drop=True)
