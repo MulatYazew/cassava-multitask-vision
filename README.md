@@ -6,6 +6,7 @@
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.x-orange?style=flat-square)
 ![Platform](https://img.shields.io/badge/Platform-MPS%20%7C%20CUDA%20%7C%20CPU-lightgrey?style=flat-square)
 ![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-Streamlit-FF4B4B?style=flat-square&logo=streamlit)](https://cassava-multitask-visiongit-cplqe9vabribzpdiuha4nt.streamlit.app/)
 
 Cassava feeds over 800 million people in sub-Saharan Africa, yet most smallholder farmers have no fast way to identify which disease is killing their crop. This project builds a full end-to-end image classification pipeline — data cleaning, class-imbalance handling, backbone comparison, and a Streamlit demo with Grad-CAM explainability — trained on the Kaggle Cassava Leaf Disease dataset.
 
@@ -129,6 +130,10 @@ Device selection is automatic: MPS (Apple Silicon) → CUDA → CPU.
 ---
 
 ## Demo app
+
+**[Try the live demo →](https://cassava-multitask-visiongit-cplqe9vabribzpdiuha4nt.streamlit.app/)**
+
+Or run locally:
 
 ```bash
 streamlit run demo/app.py
