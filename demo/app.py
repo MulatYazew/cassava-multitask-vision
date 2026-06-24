@@ -70,6 +70,19 @@ except ImportError:
     _TORCH_OK = False
 
 try:
+    import torch.nn as _nn
+    from torchvision import models as _tv_models, transforms as _tv_transforms
+    _TORCHVISION_OK = True
+except ImportError:
+    _TORCHVISION_OK = False
+
+try:
+    import joblib
+    _JOBLIB_OK = True
+except ImportError:
+    _JOBLIB_OK = False
+
+try:
     __import__("openpyxl")
     _OPENPYXL_OK = True
 except ImportError:
@@ -227,6 +240,13 @@ MAX_HISTORY  = 5
 # OOD thresholds (applied only when a real model is loaded)
 OOD_MAX_PROB  = 0.22   # below this → likely not a cassava leaf
 OOD_ENTROPY   = 0.92   # normalised entropy above this → model is very confused
+
+# ── Isolation Forest gate threshold ───────────────────────────────────────────
+# iso.decision_function() returns negative scores for outliers.
+# Scores below OOD_THRESHOLD → image rejected as non-cassava.
+# Tune: more negative = more permissive (fewer rejections).
+# Run codes/train_isolation_forest.py once to generate models/isolation_forest.pkl.
+OOD_THRESHOLD = -0.05
 
 # ═════════════════════════════════════════════════════════════════════════════
 # PAGE CONFIG  (must be first Streamlit call)
@@ -597,6 +617,22 @@ div[data-testid="stExpander"] { border:1px solid var(--border) !important; borde
   .stat-strip { grid-template-columns:repeat(2,1fr); }
   .hero-stats { gap:1rem; }
 }
+
+/* ── cassava validation banner ── */
+.valid-banner-ok {
+  background:#E8F5E9; border:1px solid #A5D6A7; border-left:4px solid var(--primary);
+  border-radius:var(--radius-sm); padding:1.1rem 1.5rem;
+  display:flex; align-items:flex-start; gap:16px; margin-bottom:1rem;
+}
+.valid-icon  { font-size:1.45rem; flex-shrink:0; color:var(--primary); font-weight:800; line-height:1.4; }
+.valid-title { font-size:.95rem; font-weight:700; color:var(--primary); margin-bottom:4px; }
+.valid-body  { font-size:.8rem; color:var(--text-2); line-height:1.65; }
+.validity-score-badge {
+  display:inline-flex; align-items:center; gap:7px;
+  background:var(--surface); border:1px solid var(--border); border-radius:20px;
+  padding:4px 14px; font-family:var(--mono); font-size:.78rem; font-weight:600;
+  margin:.25rem 0;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -652,6 +688,7 @@ def init_session_state() -> None:
         "last_prediction":     None,
         "last_probs":          None,
         "last_image":          None,
+        "last_validation":     None,
         "batch_results":       None,
         "images_processed":    0,
         "batch_uploader_gen":  0,
@@ -689,6 +726,146 @@ def load_model(model_key: str, ckpt_str: str):
     except Exception as e:
         st.error(f"Model load error: {e}")
         return None, "cpu"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# CASSAVA IMAGE VALIDATION  (Isolation Forest gatekeeper)
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ResNet-50 transform — must match codes/outlier_handler.LeafDataset.TFM
+# and codes/train_isolation_forest.TRANSFORM so features are comparable.
+_RESNET_TFM = (
+    _tv_transforms.Compose([
+        _tv_transforms.Resize(256),
+        _tv_transforms.CenterCrop(224),
+        _tv_transforms.ToTensor(),
+        _tv_transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+    ])
+    if _TORCH_OK and _TORCHVISION_OK else None
+)
+
+
+@st.cache_resource(show_spinner="Loading Isolation Forest validator…")
+def load_isolation_forest():
+    """Load the saved validation bundle from models/isolation_forest.pkl.
+    Returns the bundle dict (keys: scaler, pca, iso) or None if unavailable.
+    Generate the file first by running: python codes/train_isolation_forest.py
+    """
+    if not _JOBLIB_OK:
+        return None
+    pkl_path = Path(MODELS_DIR) / "isolation_forest.pkl"
+    if not pkl_path.exists():
+        return None
+    try:
+        bundle = joblib.load(str(pkl_path))
+        # Verify the required key is present
+        if "iso" not in bundle:
+            return None
+        return bundle
+    except Exception:
+        return None
+
+
+@st.cache_resource(show_spinner="Loading ResNet-50 feature extractor…")
+def load_resnet_extractor():
+    """Load ResNet-50 (ImageNet weights) with FC removed → 2048-dim embeddings.
+    Returns (backbone, device) or (None, 'cpu') on failure.
+    Reuses the same backbone architecture as codes/outlier_handler.py.
+    """
+    if not _TORCH_OK or not _TORCHVISION_OK:
+        return None, "cpu"
+    try:
+        _dev = get_device() if _CODES_OK else ("mps" if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu"))
+        backbone = _tv_models.resnet50(weights="IMAGENET1K_V2")
+        backbone.fc = _nn.Identity()   # strip classification head → (N, 2048)
+        backbone.eval().to(_dev)
+        return backbone, _dev
+    except Exception:
+        return None, "cpu"
+
+
+def extract_resnet_features(image: Image.Image) -> Optional[np.ndarray]:
+    """Extract a 2048-dim ResNet-50 feature vector from a PIL image.
+    Returns np.ndarray of shape (2048,) or None on failure.
+    """
+    if _RESNET_TFM is None:
+        return None
+    backbone, dev = load_resnet_extractor()
+    if backbone is None:
+        return None
+    try:
+        tensor = _RESNET_TFM(image.convert("RGB")).unsqueeze(0).to(dev)
+        with torch.no_grad():
+            feat = backbone(tensor).squeeze().cpu().numpy()
+        return feat   # shape (2048,)
+    except Exception:
+        return None
+
+
+def validate_cassava_image(image: Image.Image) -> dict:
+    """Validate whether an uploaded image is a cassava leaf.
+
+    Pipeline:
+        PIL Image
+          → ResNet-50 (2048-dim)
+          → StandardScaler (from training bundle)
+          → PCA (64-dim, from training bundle)
+          → IsolationForest.decision_function()
+          → threshold check (OOD_THRESHOLD)
+
+    Returns:
+        {
+            "is_cassava":          bool   — True = pass through to disease models
+            "score":               float  — raw IF anomaly score
+            "validity_percentage": float  — 0–100 user-friendly display score
+            "method":              str    — "isolation_forest" | "unavailable"
+        }
+
+    When the pkl is missing (first run before training), method="unavailable"
+    and is_cassava=True so the app degrades gracefully without blocking users.
+    """
+    # Graceful default: pass through when validation model is unavailable
+    _default = {
+        "is_cassava":          True,
+        "score":               0.0,
+        "validity_percentage": 100.0,
+        "method":              "unavailable",
+    }
+
+    bundle = load_isolation_forest()
+    if bundle is None:
+        return _default
+
+    feat = extract_resnet_features(image)
+    if feat is None:
+        return _default
+
+    try:
+        iso = bundle["iso"]
+
+        # Apply the same scaler + PCA that were fitted during training
+        x = feat.reshape(1, -1)   # (1, 2048)
+        if bundle.get("scaler") is not None:
+            x = bundle["scaler"].transform(x)
+        if bundle.get("pca") is not None:
+            x = bundle["pca"].transform(x)    # (1, 64)
+
+        score = float(iso.decision_function(x)[0])
+
+        # Convert raw score to a 0–100 "cassava validity" percentage.
+        # Scores for in-distribution (cassava) images cluster near 0 to +0.2.
+        # Scores for out-of-distribution images are typically below -0.2.
+        # Formula maps [-0.2, +0.2] → [0%, 100%] and clips outside that range.
+        validity_pct = max(0.0, min(100.0, ((score + 0.2) / 0.4) * 100))
+
+        return {
+            "is_cassava":          score >= OOD_THRESHOLD,
+            "score":               score,
+            "validity_percentage": validity_pct,
+            "method":              "isolation_forest",
+        }
+    except Exception:
+        return _default
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1371,7 +1548,7 @@ def _action_panel(
         with cr:
             rl = "📷 Retake" if is_camera else "↺ Reset"
             if st.button(rl, key=reset_key, use_container_width=True):
-                for k in clear_keys + ["last_prediction", "last_probs", "last_image"]:
+                for k in clear_keys + ["last_prediction", "last_probs", "last_image", "last_validation"]:
                     if k in st.session_state:
                         del st.session_state[k]
                 st.rerun()
@@ -1528,9 +1705,29 @@ def _run_inference(
     model,
     device,
 ) -> None:
-    """Run inference, update session state, and save to history."""
+    """Two-stage inference pipeline:
+      1. Cassava Image Validation  — Isolation Forest gates the image.
+      2. Disease Classification    — runs only when validation passes.
+    """
     st.session_state["last_image"] = image_obj
-    with st.spinner("Running inference…"):
+
+    # ── Stage 1: Cassava image validation ────────────────────────────────────
+    with st.spinner("Validating image…"):
+        validation = validate_cassava_image(image_obj)
+    st.session_state["last_validation"] = validation
+
+    # When the Isolation Forest is loaded and the image is rejected, stop here.
+    # Disease models, Grad-CAM, and recommendations must NOT execute.
+    if validation["method"] == "isolation_forest" and not validation["is_cassava"]:
+        st.session_state["last_prediction"] = None
+        st.session_state["last_probs"]      = None
+        st.session_state["images_processed"] = st.session_state.get("images_processed", 0) + 1
+        st.toast("Image rejected — does not appear to be a cassava leaf.", icon="⚠️")
+        st.rerun()
+        return
+
+    # ── Stage 2: Disease classification ──────────────────────────────────────
+    with st.spinner("Running disease inference…"):
         st.toast("Running inference…", icon="🔄")
         pred_idx, probs = predict_image(image_obj, model, device)
         ood = is_non_cassava(probs, model_is_real=(model is not None))
@@ -1555,15 +1752,67 @@ def _run_inference(
 
 
 def _show_cached_results(model, device, display_name: str) -> None:
-    """Display the last cached inference result."""
-    result = st.session_state.get("last_prediction")
-    probs  = st.session_state.get("last_probs")
-    img    = st.session_state.get("last_image")
-    if result is None or probs is None or img is None:
+    """Display the last cached inference result, preceded by the validation banner."""
+    img        = st.session_state.get("last_image")
+    result     = st.session_state.get("last_prediction")
+    probs      = st.session_state.get("last_probs")
+    validation = st.session_state.get("last_validation")
+
+    # Nothing analysed yet — nothing to show
+    if img is None:
+        return
+
+    H('<hr class="cv-hr">')
+
+    # ── Cassava Validity Banner ───────────────────────────────────────────────
+    if validation and validation.get("method") == "isolation_forest":
+        vp    = validation["validity_percentage"]
+        # Colour the percentage based on how confident the gate is
+        v_col = "#2E7D32" if vp >= 60 else ("#FF8F00" if vp >= 35 else "#C62828")
+
+        if validation["is_cassava"]:
+            H(f"""
+            <div class="valid-banner-ok">
+              <div class="valid-icon">✓</div>
+              <div>
+                <div class="valid-title">Cassava leaf detected</div>
+                <div class="valid-body">
+                  <span class="validity-score-badge">
+                    Cassava Validity Score:&nbsp;
+                    <span style="color:{v_col}">{vp:.1f}%</span>
+                  </span><br>
+                  Proceeding with disease analysis…
+                </div>
+              </div>
+            </div>
+            """)
+        else:
+            # Image rejected — display rejection message and stop.
+            # Disease predictions, Grad-CAM, and recommendations must not render.
+            H(f"""
+            <div class="ood-banner">
+              <div class="ood-icon">⚠️</div>
+              <div>
+                <div class="ood-title">
+                  Uploaded image does not appear to contain a cassava leaf.
+                </div>
+                <div class="ood-body">
+                  <span class="validity-score-badge">
+                    Cassava Validity Score:&nbsp;
+                    <span style="color:{v_col}">{vp:.1f}%</span>
+                  </span><br><br>
+                  Please upload a cassava leaf image for analysis.
+                </div>
+              </div>
+            </div>
+            """)
+            return  # ← hard stop: no disease output below this line
+
+    # ── Disease Prediction Results ────────────────────────────────────────────
+    if result is None or probs is None:
         return
 
     pred_idx, ood = result
-    H('<hr class="cv-hr">')
 
     if ood:
         H("""
