@@ -245,7 +245,7 @@ OOD_ENTROPY   = 0.92   # normalised entropy above this → model is very confuse
 # iso.decision_function() returns negative scores for outliers.
 # Scores below OOD_THRESHOLD → image rejected as non-cassava.
 # Tune: more negative = more permissive (fewer rejections).
-# Run codes/train_isolation_forest.py once to generate models/isolation_forest.pkl.
+# Run codes/outlier_handler.py once to generate models/isolation_forest.pkl.
 OOD_THRESHOLD = -0.05
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -733,7 +733,7 @@ def load_model(model_key: str, ckpt_str: str):
 # ═════════════════════════════════════════════════════════════════════════════
 
 # ResNet-50 transform — must match codes/outlier_handler.LeafDataset.TFM
-# and codes/train_isolation_forest.TRANSFORM so features are comparable.
+# so that inference features are comparable to the training distribution.
 _RESNET_TFM = (
     _tv_transforms.Compose([
         _tv_transforms.Resize(256),
@@ -749,7 +749,7 @@ _RESNET_TFM = (
 def load_isolation_forest():
     """Load the saved validation bundle from models/isolation_forest.pkl.
     Returns the bundle dict (keys: scaler, pca, iso) or None if unavailable.
-    Generate the file first by running: python codes/train_isolation_forest.py
+    Generate the file first by running: python codes/outlier_handler.py
     """
     if not _JOBLIB_OK:
         return None

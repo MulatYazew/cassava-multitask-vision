@@ -41,9 +41,12 @@ Usage
 """
 
 import os
+import sys
 import warnings
 warnings.filterwarnings("ignore")
 
+from pathlib import Path
+import joblib
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -58,7 +61,11 @@ from torchvision import models, transforms
 from tqdm import tqdm
 from typing import Optional
 
-from .config import RESULTS_DIR
+try:
+    from .config import RESULTS_DIR, DATA_DIR, IMAGE_DIR, MODELS_DIR
+except ImportError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from codes.config import RESULTS_DIR, DATA_DIR, IMAGE_DIR, MODELS_DIR
 
 RESULTS_DIR = str(RESULTS_DIR)
 
@@ -282,6 +289,115 @@ def detect_embedding_outliers(
     return feats_pca, ids, scores, outlier_df
 
 
+# VALIDATION MODEL TRAINING
+
+def train_validation_model(
+    csv_path: str,
+    img_dir: str,
+    output_pkl: str,
+    device: str = "cpu",
+    batch_size: int = 64,
+    num_workers: int = 0,
+    pca_dims: int = 64,
+    contamination: float = 0.05,
+) -> None:
+    """Train and save the cassava image validation bundle.
+
+    Fits a global ResNet-50 → StandardScaler → PCA → IsolationForest pipeline
+    on all training images. The saved bundle is used by demo/app.py to gate
+    uploaded images before disease classification runs.
+
+    Run once from the project root:
+        python codes/outlier_handler.py
+
+    Output keys: scaler, pca, iso, meta
+    """
+    print(f"\nCassava Image Validation Trainer")
+    print(f"{'─'*50}")
+    print(f"  Device : {device}")
+    print(f"  CSV    : {csv_path}")
+    print(f"  Images : {img_dir}")
+    print(f"  Output : {output_pkl}")
+    print(f"{'─'*50}\n")
+
+    # ── Load CSV ──────────────────────────────────────────────────────────────
+    df = pd.read_csv(csv_path)
+    col_map: dict = {}
+    for col in df.columns:
+        if col.lower() in ("image_id", "img_id", "image", "filename", "id"):
+            col_map[col] = "image_id"
+        elif col.lower() in ("label", "class", "target", "disease"):
+            col_map[col] = "label"
+    df = df.rename(columns=col_map)
+    if "image_id" not in df.columns:
+        raise ValueError(f"Cannot find image_id column. Found: {df.columns.tolist()}")
+    if "label" not in df.columns:
+        df["label"] = 0
+    print(f"[1/4] Loaded {len(df):,} images across "
+          f"{df['label'].nunique()} classes\n")
+
+    # ── Extract ResNet-50 features (reuses LeafDataset.TFM) ──────────────────
+    backbone = models.resnet50(weights="IMAGENET1K_V2")
+    backbone.fc = nn.Identity()
+    backbone.eval().to(device)
+
+    ds = LeafDataset(df, img_dir)
+    dl = DataLoader(ds, batch_size=batch_size, shuffle=False,
+                    num_workers=num_workers, pin_memory=(device == "cuda"))
+
+    print("[2/4] Extracting ResNet-50 features (2048 dims)…")
+    feats_list: list = []
+    with torch.no_grad():
+        for imgs, _, _ in tqdm(dl, desc="  ResNet-50"):
+            feats_list.append(backbone(imgs.to(device)).cpu().numpy())
+    feats = np.vstack(feats_list)
+    print(f"      Feature matrix: {feats.shape}\n")
+
+    # ── StandardScaler + PCA ─────────────────────────────────────────────────
+    print("[3/4] Fitting StandardScaler + PCA…")
+    scaler = StandardScaler()
+    feats_scaled = scaler.fit_transform(feats)
+    pca = PCA(n_components=pca_dims, random_state=42)
+    feats_pca = pca.fit_transform(feats_scaled)
+    var_explained = pca.explained_variance_ratio_.sum()
+    print(f"      PCA: {pca_dims} components, {var_explained:.1%} variance explained\n")
+
+    # ── IsolationForest ───────────────────────────────────────────────────────
+    print("[4/4] Fitting IsolationForest…")
+    iso = IsolationForest(
+        contamination=contamination,
+        random_state=42,
+        n_jobs=-1,
+        n_estimators=200,
+    )
+    iso.fit(feats_pca)
+    scores = iso.decision_function(feats_pca)
+    print(f"      Score stats (training):")
+    print(f"        min={scores.min():.4f}  max={scores.max():.4f}"
+          f"  mean={scores.mean():.4f}  median={np.median(scores):.4f}")
+
+    # ── Save bundle ───────────────────────────────────────────────────────────
+    bundle = {
+        "scaler": scaler,
+        "pca":    pca,
+        "iso":    iso,
+        "meta": {
+            "n_training_images": len(df),
+            "pca_dims":          pca_dims,
+            "contamination":     contamination,
+            "score_mean":        float(scores.mean()),
+            "score_median":      float(np.median(scores)),
+        },
+    }
+    Path(output_pkl).parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(bundle, output_pkl)
+
+    print(f"\n{'─'*50}")
+    print(f"  Saved → {output_pkl}")
+    print(f"{'─'*50}")
+    print("\nNext: streamlit run demo/app.py\n")
+
+
 # VISUALISATION
 
 def visualizeflagged_images(
@@ -459,3 +575,19 @@ def run_outlier_pipeline(
     print(f"{'-'*60}\n")
 
     return df, stats_df, flagged2, feats, ids, scores, flagged3
+
+
+if __name__ == "__main__":
+    def get_device() -> str:
+        if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            return "mps"
+        if torch.cuda.is_available():
+            return "cuda"
+        return "cpu"
+
+    train_validation_model(
+        csv_path=str(DATA_DIR / "train.csv"),
+        img_dir=str(IMAGE_DIR),
+        output_pkl=str(MODELS_DIR / "isolation_forest.pkl"),
+        device=get_device(),
+    )
