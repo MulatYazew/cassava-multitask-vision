@@ -228,6 +228,12 @@ MAX_HISTORY  = 5
 OOD_MAX_PROB  = 0.22   # below this → likely not a cassava leaf
 OOD_ENTROPY   = 0.92   # normalised entropy above this → model is very confused
 
+# ── Service availability ───────────────────────────────────────────────────────
+# Set MAINTENANCE_MODE = True to force the unavailability page even when models exist.
+# Update ESTIMATED_RETURN whenever you know the ETA so users see an accurate time.
+MAINTENANCE_MODE = False
+ESTIMATED_RETURN = "2026-06-25 at 09:00 UTC"
+
 # ═════════════════════════════════════════════════════════════════════════════
 # PAGE CONFIG  (must be first Streamlit call)
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1020,7 +1026,7 @@ def render_header() -> None:
 
 def render_stat_strip(model_ready: bool) -> None:
     dot   = "sdot-ok" if model_ready else "sdot-warn"
-    label = "Model online" if model_ready else "Demo mode"
+    label = "Model online" if model_ready else "Service offline"
     H(f"""
     <div class="stat-strip">
       <div class="stat-card"><div class="stat-icon g">🦠</div>
@@ -1100,7 +1106,7 @@ def render_sidebar() -> tuple[str, str, bool, object, object]:
                 model_ready = False
 
         dot   = "sdot-ok"   if model_ready else "sdot-warn"
-        label = "Checkpoint loaded" if model_ready else "Demo mode (no checkpoint)"
+        label = "Checkpoint loaded" if model_ready else "Service unavailable"
         H(f"""
         <div style="margin-bottom:1rem">
           <div class="sec-label" style="margin-bottom:.5rem">System Status</div>
@@ -1110,14 +1116,6 @@ def render_sidebar() -> tuple[str, str, bool, object, object]:
           {'<div style="font-size:.68rem;color:var(--text-3);font-family:var(--mono);margin-top:4px">' + ckpt.name + '</div>' if ckpt else ''}
         </div>
         """)
-        if not model_ready:
-            H("""
-            <div class="warn-banner">
-              <strong style="color:var(--accent)">Demo Mode</strong><br>
-              Place <code>.pth</code> checkpoints in <code>models/</code>
-              to enable real inference. Predictions are currently simulated.
-            </div>
-            """)
 
         H('<hr class="cv-hr">')
 
@@ -1804,6 +1802,79 @@ def render_footer() -> None:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# UI — SERVICE UNAVAILABLE
+# ═════════════════════════════════════════════════════════════════════════════
+
+def render_service_unavailable() -> None:
+    H(f"""
+    <div style="
+      max-width:640px; margin:3rem auto; text-align:center;
+      background:#FFFFFF; border:1px solid #E0E0E0; border-radius:20px;
+      padding:3.5rem 2.5rem; box-shadow:0 8px 40px rgba(0,0,0,0.10);
+    ">
+      <div style="font-size:3.5rem; margin-bottom:1rem">🔧</div>
+
+      <div style="font-size:1.5rem; font-weight:800; color:#263238;
+        letter-spacing:-0.02em; margin-bottom:.5rem">
+        Service Temporarily Unavailable
+      </div>
+
+      <div style="
+        display:inline-block; margin:.75rem 0 1.5rem;
+        background:#FFEBEE; border:1px solid #FFCDD2; border-radius:8px;
+        padding:6px 18px; font-family:'JetBrains Mono',monospace;
+        font-size:.8rem; color:#C62828; font-weight:600;
+      ">
+        AI diagnostic service is currently offline
+      </div>
+
+      <div style="font-size:.9rem; color:#546E7A; line-height:1.8; margin-bottom:2rem">
+        The Cassava Vision AI platform is temporarily offline while our team
+        restores the diagnostic models. We apologise for the inconvenience
+        and thank you for your patience.
+      </div>
+
+      <div style="
+        background:#E8F5E9; border:1px solid #C8E6C9; border-radius:14px;
+        padding:1.25rem 1.75rem; margin-bottom:1.75rem;
+      ">
+        <div style="font-size:.62rem; font-weight:700; text-transform:uppercase;
+          letter-spacing:.14em; color:#2E7D32; font-family:monospace; margin-bottom:.5rem">
+          Estimated Return
+        </div>
+        <div style="font-size:1.2rem; font-weight:700; color:#1B5E20;
+          font-family:'JetBrains Mono',monospace">
+          {ESTIMATED_RETURN}
+        </div>
+        <div style="font-size:.74rem; color:#388E3C; margin-top:.4rem">
+          Please revisit the app after this time.
+        </div>
+      </div>
+
+      <div style="
+        background:#F5F7FA; border:1px solid #E0E0E0; border-radius:10px;
+        padding:1rem 1.25rem; text-align:left; margin-bottom:1.5rem;
+      ">
+        <div style="font-size:.68rem; font-weight:700; text-transform:uppercase;
+          letter-spacing:.12em; color:#90A4AE; font-family:monospace; margin-bottom:.6rem">
+          What you can do now
+        </div>
+        <div style="font-size:.8rem; color:#546E7A; line-height:1.9">
+          • Note the estimated return time above and revisit then<br>
+          • Contact your agronomist for urgent disease queries<br>
+          • If the service is still down after the estimated time, notify your system administrator
+        </div>
+      </div>
+
+      <div style="font-size:.72rem; color:#B0BEC5; line-height:1.6">
+        Cassava Vision AI &mdash; Agricultural AI Platform<br>
+        For research &amp; educational use. Always verify with a qualified agronomist.
+      </div>
+    </div>
+    """)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # MAIN
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -1816,6 +1887,11 @@ def main() -> None:
     # Hero + stats
     render_header()
     render_stat_strip(model_ready)
+
+    # Block the app when models are missing or maintenance mode is enabled
+    if not model_ready or MAINTENANCE_MODE:
+        render_service_unavailable()
+        st.stop()
 
     # Main tabs
     tab_single, tab_batch = st.tabs([
