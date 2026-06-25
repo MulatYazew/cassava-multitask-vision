@@ -317,7 +317,6 @@ def train_validation_model(
     print(f"  Images : {img_dir}")
     print(f"  Output : {output_pkl}")
     print(f"{'─'*50}\n")
-
     # ── Load CSV ──────────────────────────────────────────────────────────────
     df = pd.read_csv(csv_path)
     col_map: dict = {}
@@ -333,7 +332,6 @@ def train_validation_model(
         df["label"] = 0
     print(f"[1/4] Loaded {len(df):,} images across "
           f"{df['label'].nunique()} classes\n")
-
     # ── Extract ResNet-50 features (reuses LeafDataset.TFM) ──────────────────
     backbone = models.resnet50(weights="IMAGENET1K_V2")
     backbone.fc = nn.Identity()
@@ -350,7 +348,6 @@ def train_validation_model(
             feats_list.append(backbone(imgs.to(device)).cpu().numpy())
     feats = np.vstack(feats_list)
     print(f"      Feature matrix: {feats.shape}\n")
-
     # ── StandardScaler + PCA ─────────────────────────────────────────────────
     print("[3/4] Fitting StandardScaler + PCA…")
     scaler = StandardScaler()
@@ -359,7 +356,6 @@ def train_validation_model(
     feats_pca = pca.fit_transform(feats_scaled)
     var_explained = pca.explained_variance_ratio_.sum()
     print(f"      PCA: {pca_dims} components, {var_explained:.1%} variance explained\n")
-
     # ── IsolationForest ───────────────────────────────────────────────────────
     print("[4/4] Fitting IsolationForest…")
     iso = IsolationForest(
@@ -373,7 +369,6 @@ def train_validation_model(
     print(f"      Score stats (training):")
     print(f"        min={scores.min():.4f}  max={scores.max():.4f}"
           f"  mean={scores.mean():.4f}  median={np.median(scores):.4f}")
-
     # ── Save bundle ───────────────────────────────────────────────────────────
     bundle = {
         "scaler": scaler,

@@ -14,7 +14,6 @@ Run:
 """
 
 from __future__ import annotations
-
 # ── stdlib ────────────────────────────────────────────────────────────────────
 import io
 import re
@@ -24,12 +23,10 @@ import zipfile
 import datetime
 from pathlib import Path
 from typing import Optional
-
 # ── core deps (always available) ──────────────────────────────────────────────
 import numpy as np
 import streamlit as st
 from PIL import Image
-
 # ── optional deps (fail gracefully) ──────────────────────────────────────────
 try:
     import pandas as pd
@@ -89,7 +86,6 @@ except ImportError:
     import subprocess as _sp
     _sp.check_call([sys.executable, "-m", "pip", "install", "openpyxl", "-q"])
     _OPENPYXL_OK = True
-
 # ── path / project imports ────────────────────────────────────────────────────
 FILE     = Path(__file__).resolve()
 DEMO_DIR = FILE.parent
@@ -240,7 +236,6 @@ MAX_HISTORY  = 5
 # OOD thresholds (applied only when a real model is loaded)
 OOD_MAX_PROB  = 0.22   # below this → likely not a cassava leaf
 OOD_ENTROPY   = 0.92   # normalised entropy above this → model is very confused
-
 # ── Isolation Forest gate threshold ───────────────────────────────────────────
 # iso.decision_function() returns negative scores for outliers.
 # Scores below OOD_THRESHOLD → image rejected as non-cassava.
@@ -941,7 +936,6 @@ def generate_gradcam(
     Gaussian-blob heatmap that can be swapped for the real implementation later.
     """
     img_rgb = np.array(image.convert("RGB"))
-
     # ── real Grad-CAM ─────────────────────────────────────────────────────────
     if _CODES_OK and model is not None:
         try:
@@ -952,7 +946,6 @@ def generate_gradcam(
             return overlay_heatmap(resized, heatmap, alpha=alpha), resized
         except Exception:
             pass  # fall through to simulation
-
     # ── simulated Grad-CAM ───────────────────────────────────────────────────
     if not (_CV2_OK and _MPL_OK):
         return None, None
@@ -1235,7 +1228,6 @@ def render_sidebar() -> tuple[str, str, bool, object, object]:
           </div>
         </div>
         """)
-
         # ── model selection ─────────────────────────────────────────────────
         H('<div class="sec-label"><span class="sec-num">1</span>Select Model</div>')
         display_names = list(MODELS_META.keys())
@@ -1251,7 +1243,6 @@ def render_sidebar() -> tuple[str, str, bool, object, object]:
           <div class="model-desc">{meta['desc']}</div>
         </div>
         """)
-
         # ── crop selection ──────────────────────────────────────────────────
         H('<div class="sec-label"><span class="sec-num">2</span>Select Crop</div>')
         crop = st.selectbox(
@@ -1266,7 +1257,6 @@ def render_sidebar() -> tuple[str, str, bool, object, object]:
             """)
 
         H('<hr class="cv-hr">')
-
         # ── load model / status ─────────────────────────────────────────────
         ckpt        = _ckpt_path(selected_display)
         model_ready = ckpt is not None
@@ -1297,7 +1287,6 @@ def render_sidebar() -> tuple[str, str, bool, object, object]:
             """)
 
         H('<hr class="cv-hr">')
-
         # ── prediction history ──────────────────────────────────────────────
         H('<div class="sec-label"><span class="sec-num">3</span>Recent Predictions</div>')
         history = [e for e in st.session_state.get("prediction_history", []) if e["crop"] == crop]
@@ -1320,7 +1309,6 @@ def render_sidebar() -> tuple[str, str, bool, object, object]:
             H('<div style="font-size:.78rem;color:var(--text-3)">No predictions yet.</div>')
 
         H('<hr class="cv-hr">')
-
         # ── disease class reference ─────────────────────────────────────────
         with st.expander("Disease Classes Reference"):
             for i in range(NUM_CLASSES):
@@ -1576,7 +1564,6 @@ def render_single_analysis(
     filename   = "image"
     file_bytes = 0
     do_analyze = False
-
     # ── Upload File ──────────────────────────────────────────────────────────
     if "Upload" in input_mode:
         H("""
@@ -1605,7 +1592,6 @@ def render_single_analysis(
                 analyze_key="btn_an_upload", reset_key="btn_rst_upload",
                 clear_keys=["single_uploader"], model_ready=model_ready,
             )
-
     # ── Take Photo ───────────────────────────────────────────────────────────
     elif "Photo" in input_mode:
         H("""
@@ -1640,7 +1626,6 @@ def render_single_analysis(
               </div>
             </div>
             """)
-
     # ── Google Drive ─────────────────────────────────────────────────────────
     else:
         H("""
@@ -1670,7 +1655,6 @@ def render_single_analysis(
                     analyze_key="btn_an_gdrive", reset_key="btn_rst_gdrive",
                     clear_keys=["gdrive_url"], model_ready=model_ready,
                 )
-
     # ── empty state tip ───────────────────────────────────────────────────────
     if image_obj is None and "Photo" not in input_mode:
         if st.session_state.get("last_prediction") is None:
@@ -1688,11 +1672,9 @@ def render_single_analysis(
             # Still show cached results if they exist
             _show_cached_results(model, device, display_name)
             return
-
     # ── run inference ─────────────────────────────────────────────────────────
     if do_analyze and image_obj is not None:
         _run_inference(image_obj, filename, crop, display_name, model, device)
-
     # ── show results ──────────────────────────────────────────────────────────
     _show_cached_results(model, device, display_name)
 
@@ -1710,7 +1692,6 @@ def _run_inference(
       2. Disease Classification    — runs only when validation passes.
     """
     st.session_state["last_image"] = image_obj
-
     # ── Stage 1: Cassava image validation ────────────────────────────────────
     with st.spinner("Validating image…"):
         validation = validate_cassava_image(image_obj)
@@ -1725,7 +1706,6 @@ def _run_inference(
         st.toast("Image rejected — does not appear to be a cassava leaf.", icon="⚠️")
         st.rerun()
         return
-
     # ── Stage 2: Disease classification ──────────────────────────────────────
     with st.spinner("Running disease inference…"):
         st.toast("Running inference…", icon="🔄")
@@ -1763,7 +1743,6 @@ def _show_cached_results(model, device, display_name: str) -> None:
         return
 
     H('<hr class="cv-hr">')
-
     # ── Cassava Validity Banner ───────────────────────────────────────────────
     if validation and validation.get("method") == "isolation_forest":
         vp    = validation["validity_percentage"]
@@ -1807,7 +1786,6 @@ def _show_cached_results(model, device, display_name: str) -> None:
             </div>
             """)
             return  # ← hard stop: no disease output below this line
-
     # ── Disease Prediction Results ────────────────────────────────────────────
     if result is None or probs is None:
         return
@@ -1928,7 +1906,6 @@ def render_batch_section(
     df = st.session_state.get("batch_results")
     if df is None or not _PANDAS_OK:
         return
-
     # ── summary metrics ───────────────────────────────────────────────────────
     H('<hr class="cv-hr">')
     total    = len(df)
@@ -1947,11 +1924,9 @@ def render_batch_section(
         <div><div class="stat-val">{flagged}</div><div class="stat-lbl">Non-cassava</div></div></div>
     </div>
     """)
-
     # ── results table ─────────────────────────────────────────────────────────
     H('<div class="sec-label">Results Table</div>')
     st.dataframe(df, use_container_width=True, hide_index=True)
-
     # ── download buttons ──────────────────────────────────────────────────────
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     dl1, dl2, _ = st.columns([1, 1, 2])
@@ -1973,7 +1948,6 @@ def render_batch_section(
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="dl_excel", use_container_width=True,
             )
-
     # ── distribution chart ────────────────────────────────────────────────────
     if _PLOTLY_OK and len(df) > 0:
         H('<div class="sec-label" style="margin-top:1rem">Disease Distribution</div>')
