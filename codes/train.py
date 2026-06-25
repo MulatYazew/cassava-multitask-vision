@@ -96,7 +96,6 @@ class Trainer:
 
         mixed = images.clone()
         mixed[:, :, y1:y2, x1:x2] = images[idx, :, y1:y2, x1:x2]
-        # Adjust lam to reflect actual patch area
         lam = 1.0 - (y2 - y1) * (x2 - x1) / (H * W)
         return mixed, labels, labels[idx], lam
 
@@ -139,10 +138,8 @@ class Trainer:
                 if use_mix:
                     images, labels_a, labels_b, lam = self.apply_mix(images, labels)
                     outputs = self.model(images)
-                    # Mixed loss: weighted combination of two cross-entropy terms
                     loss = lam * self.criterion(outputs, labels_a) + (1.0 - lam) * self.criterion(outputs, labels_b)
                     preds   = outputs.argmax(1)
-                    # Approx accuracy: weighted vote of both labels
                     correct += (
                         lam       * (preds == labels_a).float() +
                         (1 - lam) * (preds == labels_b).float()
@@ -155,7 +152,6 @@ class Trainer:
 
                 if training:
                     loss.backward()
-                    # Gradient clipping improves MPS/CUDA stability
                     nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                     self.optimizer.step()
 

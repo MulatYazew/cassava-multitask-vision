@@ -67,12 +67,6 @@ class FocalLoss(nn.Module):
     is dominated by hard minority cases (especially CBB with only ~5 % of
     samples).
 
-    Formula::
-
-        FL(p_t) = -alpha_t · (1 - p_t)^gamma · log(p_t)
-
-    where ``p_t`` is the probability assigned to the correct class.
-
     Args:
         alpha     : Per-class weight tensor of shape ``(num_classes,)``.
                     Pass ``compute_class_weights(train_df)`` here.
@@ -105,7 +99,6 @@ class FocalLoss(nn.Module):
         logits: torch.Tensor,
         targets: torch.Tensor,
     ) -> torch.Tensor:
-        # Per-sample CE (possibly class-weighted + label-smoothed) — shape (B,)
         ce_loss = F.cross_entropy(
             logits,
             targets,
@@ -113,9 +106,7 @@ class FocalLoss(nn.Module):
             label_smoothing=self.label_smoothing,
             reduction="none",
         )
-        # p_t = probability assigned to the correct class
         pt = torch.exp(-ce_loss)
-        # Focal modulation: suppresses easy examples (high p_t → small weight)
         focal_loss = (1.0 - pt) ** self.gamma * ce_loss
 
         if self.reduction == "mean":

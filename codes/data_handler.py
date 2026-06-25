@@ -1,7 +1,6 @@
 """
 AgroVision Data Handler
 Dataset, DataLoader, augmentation pipelines, and class-weight helpers.
-Apple Silicon note: num_workers=0 avoids macOS multiprocessing hangs.
 """
 
 import json

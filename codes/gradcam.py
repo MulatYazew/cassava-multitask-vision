@@ -117,8 +117,7 @@ class GradCAM:
         activations = self.stored_activations[0]      # (C, h, w)
         gradients   = self.stored_gradients[0]         # (C, h, w)
 
-        # Global-average-pool the gradients -> per-channel importance weights.
-        weights = gradients.mean(dim=(1, 2))           # (C,)
+        weights = gradients.mean(dim=(1, 2))           # (C,) — spatial mean per channel
 
         cam = torch.zeros(activations.shape[1:], dtype=torch.float32, device=activations.device)
         for c, w in enumerate(weights):

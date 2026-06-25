@@ -1,10 +1,8 @@
 """
 cassava_outlier_handler.py
 ===========================
-Outlier detection for the Cassava Leaf Disease dataset (5 classes:
-cbb, cbsd, cgm, cmd, healthy). Leaves are photographed against varied
-backgrounds (soil, hands, sky, other plants), so this is rebuilt from
-scratch for THIS domain rather than reusing the food-image heuristics.
+Outlier detection pipeline for the Cassava Leaf Disease dataset
+(5 classes: cbb, cbsd, cgm, cmd, healthy).
 
 DETECTION TARGETS
 ------------------
@@ -26,14 +24,14 @@ Stage 3 — Per-class embedding outliers
 
 Usage
 -----
-    from cassava_outlier_handler import run_outlier_pipeline, visualizeFLAGged_images
+    from cassava_outlier_handler import run_outlier_pipeline, visualize_flagged_images
 
     df, stats_df, flagged2, feats, ids, scores, flagged3 = run_outlier_pipeline(
         csv_path="train.csv", img_dir="train_images/", device="cuda"
     )
 
-    visualizeFLAGged_images(flagged2, "train_images/", title="Stage 2 - not leaf-like")
-    visualizeFLAGged_images(flagged3, "train_images/", title="Stage 3 - embedding outliers")
+    visualize_flagged_images(flagged2, "train_images/", title="Stage 2 - not leaf-like")
+    visualize_flagged_images(flagged3, "train_images/", title="Stage 3 - embedding outliers")
 
     # After visually confirming which ones are real outliers, build a
     # remove-list (list of image_ids) and call:
@@ -400,7 +398,7 @@ def train_validation_model(
 
 # VISUALISATION
 
-def visualizeflagged_images(
+def visualize_flagged_images(
     flagged_df: pd.DataFrame,
     img_dir: str,
     title: str = "Flagged images",
@@ -565,8 +563,8 @@ def run_outlier_pipeline(
         print(f"  Stage 3 flagged    : {len(flagged3):,}  -> review_stage3_embedding.csv")
     print()
     print("NEXT STEPS:")
-    print("  1. visualizeFLAGged_images(flagged2, img_dir, title='Stage 2 - not leaf-like')")
-    print("  2. visualizeFLAGged_images(flagged3, img_dir, title='Stage 3 - embedding outliers')")
+    print("  1. visualize_flagged_images(flagged2, img_dir, title='Stage 2 - not leaf-like')")
+    print("  2. visualize_flagged_images(flagged3, img_dir, title='Stage 3 - embedding outliers')")
     print("  3. plot_green_fraction_distribution(stats_df, flagged2)  # tune threshold if needed")
     if not skip_stage3:
         print("  4. plot_anomaly_score_distribution(scores, per_class_thr)")
