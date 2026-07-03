@@ -131,10 +131,9 @@ Device selection is automatic: MPS (Apple Silicon) → CUDA → CPU.
 
 ## Demo app
 
-- **Public (share this one):** https://cassava-multitask-visiongit-cplqe9vabribzpdiuha4nt.streamlit.app/
-- **Admin (me):** https://cassava-multitask-visiongit-cplqe9vabribzpdiuha4nt.streamlit.app/?admin=&lt;ADMIN_TOKEN&gt;
+**[Try the live demo →](https://cassava-multitask-visiongit-cplqe9vabribzpdiuha4nt.streamlit.app/)**
 
-The bare public link now self-redirects into Community Cloud's `?embed=true` view, which hides the platform toolbar (Share/star/fork, GitHub icon, footer, top color bar) — so it's safe to hand out as-is, with nothing to append manually. The admin link (with the real `ADMIN_TOKEN` value set in the app's Secrets) bypasses the redirect and shows full chrome for management. See [`.streamlit/secrets.toml.example`](.streamlit/secrets.toml.example) for how to set `ADMIN_TOKEN`.
+The bare link self-redirects into Community Cloud's `?embed=true` view for every visitor, including the owner — no Streamlit or Community Cloud branding (Share/star/fork, GitHub icon, footer, top color bar, native toolbar) is ever shown. There is no admin bypass; app management (secrets, reboot, logs) happens through the Community Cloud dashboard, not the in-app chrome.
 
 Or run locally:
 

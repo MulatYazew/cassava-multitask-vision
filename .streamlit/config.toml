@@ -1,0 +1,5 @@
+# Backup safeguard alongside the CSS in demo/app.py: forces Streamlit's
+# native toolbar into "viewer" mode (no Rerun/Settings/Deploy/etc. options)
+# even if the CSS hasn't applied yet on first paint.
+[client]
+toolbarMode = "viewer"

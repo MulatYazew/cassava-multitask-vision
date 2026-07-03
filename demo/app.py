@@ -42,39 +42,48 @@ st.set_page_config(
 )
 
 # ═════════════════════════════════════════════════════════════════════════════
-# EMBED ENFORCEMENT
+# EMBED ENFORCEMENT — everyone, including the owner, always gets the clean view
 # ═════════════════════════════════════════════════════════════════════════════
 # Community Cloud's ?embed=true hides its platform chrome (Share/star/fork
-# buttons, GitHub icon, footer, top color bar) for visitors. Anyone opening the
-# bare app URL gets client-side redirected into embed mode automatically; only
-# a link carrying the correct ADMIN_TOKEN (set in Secrets) bypasses it and
-# shows full chrome. See .streamlit/secrets.toml.example for setup.
-def _admin_token() -> str:
-    try:
-        return st.secrets.get("ADMIN_TOKEN", "")
-    except Exception:
-        # No secrets.toml on disk yet (e.g. first local run) — treat as unset
-        # rather than crashing the app.
-        return ""
+# buttons, GitHub icon, footer, top color bar) for every visitor. There is no
+# admin bypass: the bare URL always redirects into embed mode for anyone who
+# opens it, including the app owner. Real app management (secrets, reboot,
+# logs) happens through the Community Cloud dashboard, not this in-app chrome.
+#
+# NOTE: "embed" is a reserved query param that Streamlit deliberately hides
+# from st.query_params (it's consumed by the frontend chrome only) — checking
+# `"embed" not in st.query_params` is therefore always true and causes an
+# infinite redirect loop. st.context.is_embedded is the documented way to
+# detect embed mode from script code.
+if not st.context.is_embedded:
+    st.markdown(
+        "<meta http-equiv='refresh' content='0; url=?embed=true'>",
+        unsafe_allow_html=True,
+    )
+    st.stop()
 
-
-def _enforce_embed_view() -> None:
-    token = _admin_token()
-    is_admin = bool(token) and st.query_params.get("admin") == token
-    # NOTE: "embed" is a reserved query param that Streamlit deliberately
-    # hides from st.query_params (it's consumed by the frontend chrome only),
-    # so checking `"embed" not in st.query_params` is always true and causes
-    # an infinite redirect loop. st.context.is_embedded is the documented way
-    # to detect embed mode from script code.
-    if not st.context.is_embedded and not is_admin:
-        st.markdown(
-            "<meta http-equiv='refresh' content='0; url=?embed=true'>",
-            unsafe_allow_html=True,
-        )
-        st.stop()
-
-
-_enforce_embed_view()
+# Hide Streamlit's native toolbar (⋮ menu, running-man status) and footer —
+# ?embed=true alone does not remove these, only Community Cloud's own chrome.
+# Deliberately NOT touching `header` itself (that's a separate risk some
+# guides warn about). The risk actually verified here (headless-browser
+# tested against the installed Streamlit version) is narrower and different:
+# [data-testid="stExpandSidebarButton"] — the arrow that reappears to
+# re-open a collapsed sidebar — is rendered INSIDE [data-testid="stToolbar"]'s
+# DOM subtree, not as a sibling. Hiding stToolbar with `visibility: hidden`
+# would otherwise cascade to that button too (visibility is inherited) and
+# strand anyone who collapses the sidebar with no way to reopen it. The
+# override rule below explicitly re-shows just that one descendant.
+st.markdown(
+    """
+    <style>
+    [data-testid="stToolbar"] {visibility: hidden; height: 0; position: fixed;}
+    [data-testid="stToolbar"] [data-testid="stExpandSidebarButton"] {visibility: visible !important;}
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 # ── optional deps (fail gracefully) ──────────────────────────────────────────
 try:
@@ -337,7 +346,7 @@ st.markdown("""
 /* ── reset ── */
 .stApp { background: var(--bg) !important; font-family: var(--sans); color: var(--text); }
 * { box-sizing: border-box; }
-#MainMenu, footer { visibility: hidden; }
+/* #MainMenu / footer hiding lives in the EMBED ENFORCEMENT block at the top of the file */
 .block-container { padding: 1.5rem 2rem 4rem !important; max-width: 1400px !important; }
 h1,h2,h3,h4 { font-family: var(--sans); letter-spacing: -0.02em; color: var(--text); }
 
@@ -671,21 +680,6 @@ div[data-testid="stExpander"] { border:1px solid var(--border) !important; borde
 }
 </style>
 """, unsafe_allow_html=True)
-
-# ── embed padding restoration ─────────────────────────────────────────────────
-# ?embed=true strips Streamlit's default top/bottom page padding. Rather than
-# ask visitors to remember &embed_options=show_padding on a "clean" shareable
-# link, restore comfortable spacing ourselves whenever we detect embed mode.
-# (st.context.is_embedded, not st.query_params — see note in _enforce_embed_view.)
-if st.context.is_embedded:
-    st.markdown(
-        """
-        <style>
-        .block-container { padding-top: 2.5rem !important; padding-bottom: 3rem !important; }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
 
 
 # ═════════════════════════════════════════════════════════════════════════════
