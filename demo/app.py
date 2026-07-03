@@ -141,9 +141,9 @@ try:
     __import__("openpyxl")
     _OPENPYXL_OK = True
 except ImportError:
-    import subprocess as _sp
-    _sp.check_call([sys.executable, "-m", "pip", "install", "openpyxl", "-q"])
-    _OPENPYXL_OK = True
+    # openpyxl is a declared dependency in requirements.txt; this should not
+    # happen in a correctly provisioned deployment (Community Cloud/HF Spaces).
+    _OPENPYXL_OK = False
 # ── path / project imports ────────────────────────────────────────────────────
 FILE     = Path(__file__).resolve()
 DEMO_DIR = FILE.parent

@@ -1,3 +1,14 @@
+---
+title: Cassava Vision AI
+emoji: 🌿
+colorFrom: green
+colorTo: blue
+sdk: streamlit
+sdk_version: 1.58.0
+app_file: demo/app.py
+pinned: false
+---
+
 # AgroVision Africa
 
 **Cassava Leaf Disease Classification — from noisy field photos to explainable predictions**
@@ -102,10 +113,26 @@ Test-Time Augmentation (TTA, 5 views) is applied at inference. Final metrics inc
 
 ## Setup
 
+Two separate dependency files, for two separate purposes:
+
+- **`requirements.txt`** — only what `demo/app.py` needs to run. This is what Streamlit Community Cloud and Hugging Face Spaces install.
+- **`requirements-train.txt`** — the full local training/notebook environment (adds albumentations extras, scikit-learn, tensorboard, cleanlab, jupyter, etc.).
+
+To run the demo app locally:
+
 ```bash
 python -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+streamlit run demo/app.py
+```
+
+To run the training pipeline / notebook instead:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-train.txt
 ```
 
 Download the [Kaggle Cassava Leaf Disease dataset](https://www.kaggle.com/c/cassava-leaf-disease-classification/data) and place it under `cassava-leaf-dataset/` so the folder contains `train.csv`, `train_images/`, and `label_num_to_disease_map.json`.
@@ -142,6 +169,25 @@ streamlit run demo/app.py
 ```
 
 Upload any cassava leaf photo. The app returns the predicted disease class, per-class confidence scores, and a Grad-CAM heatmap showing which regions drove the prediction. You can swap between all three trained backbones from the sidebar.
+
+### Deploying to Hugging Face Spaces
+
+This repo is also set up to run as a Hugging Face Space, independent of the Community Cloud deployment above — the YAML block at the very top of this README (`sdk: streamlit`, `app_file: demo/app.py`) is HF Spaces' own config format and is what makes that possible.
+
+1. Create a new Space at [huggingface.co/new-space](https://huggingface.co/new-space): pick the **Streamlit** SDK, any visibility you want.
+2. Add it as a second git remote in your local clone and push:
+   ```bash
+   git remote add space https://huggingface.co/spaces/<your-username>/<space-name>
+   git push space main
+   ```
+3. Push the LFS-tracked model checkpoints too — a new remote does not automatically copy LFS objects from GitHub:
+   ```bash
+   git lfs push space main
+   ```
+4. The Space rebuilds automatically on push. It installs `requirements.txt` (not `requirements-train.txt`) and launches `demo/app.py` per the README frontmatter — no other config needed.
+5. Nothing in `demo/app.py` requires API keys or secrets, so there's nothing to add under the Space's Settings → Variables and secrets.
+
+The embed/toolbar-hiding logic in `demo/app.py` (see the top of the file) is harmless on HF Spaces too: `st.context.is_embedded` will simply be `False` there, so it does one redirect to `?embed=true` on first load and hides Streamlit's native toolbar — there's just no Community-Cloud-specific chrome underneath to hide, since that only exists on `*.streamlit.app`.
 
 ---
 
