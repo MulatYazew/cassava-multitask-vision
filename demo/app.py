@@ -29,7 +29,20 @@ import streamlit as st
 from PIL import Image
 
 # ═════════════════════════════════════════════════════════════════════════════
-# EMBED ENFORCEMENT — must run before any other Streamlit command
+# PAGE CONFIG — must be the first Streamlit command in the script. Set before
+# the embed check below so the browser tab shows the real title/icon (🌿)
+# immediately, instead of flashing Streamlit's default icon/title for the one
+# run that redirects a first-time visitor into embed mode.
+# ═════════════════════════════════════════════════════════════════════════════
+st.set_page_config(
+    page_title="Cassava Vision AI",
+    page_icon="🌿",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# EMBED ENFORCEMENT
 # ═════════════════════════════════════════════════════════════════════════════
 # Community Cloud's ?embed=true hides its platform chrome (Share/star/fork
 # buttons, GitHub icon, footer, top color bar) for visitors. Anyone opening the
@@ -279,15 +292,7 @@ OOD_ENTROPY   = 0.92   # normalised entropy above this → model is very confuse
 # Run codes/outlier_handler.py once to generate models/isolation_forest.pkl.
 OOD_THRESHOLD = -0.05
 
-# ═════════════════════════════════════════════════════════════════════════════
-# PAGE CONFIG  (must be first Streamlit call)
-# ═════════════════════════════════════════════════════════════════════════════
-st.set_page_config(
-    page_title="Cassava Vision AI",
-    page_icon="🌿",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+# (page config is set at the very top of the file, before the embed check)
 
 # ═════════════════════════════════════════════════════════════════════════════
 # GLOBAL CSS
