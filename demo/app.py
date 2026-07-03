@@ -27,6 +27,38 @@ from typing import Optional
 import numpy as np
 import streamlit as st
 from PIL import Image
+
+# ═════════════════════════════════════════════════════════════════════════════
+# EMBED ENFORCEMENT — must run before any other Streamlit command
+# ═════════════════════════════════════════════════════════════════════════════
+# Community Cloud's ?embed=true hides its platform chrome (Share/star/fork
+# buttons, GitHub icon, footer, top color bar) for visitors. Anyone opening the
+# bare app URL gets client-side redirected into embed mode automatically; only
+# a link carrying the correct ADMIN_TOKEN (set in Secrets) bypasses it and
+# shows full chrome. See .streamlit/secrets.toml.example for setup.
+def _admin_token() -> str:
+    try:
+        return st.secrets.get("ADMIN_TOKEN", "")
+    except Exception:
+        # No secrets.toml on disk yet (e.g. first local run) — treat as unset
+        # rather than crashing the app.
+        return ""
+
+
+def _enforce_embed_view() -> None:
+    params = st.query_params
+    token = _admin_token()
+    is_admin = bool(token) and params.get("admin") == token
+    if "embed" not in params and not is_admin:
+        st.markdown(
+            "<meta http-equiv='refresh' content='0; url=?embed=true'>",
+            unsafe_allow_html=True,
+        )
+        st.stop()
+
+
+_enforce_embed_view()
+
 # ── optional deps (fail gracefully) ──────────────────────────────────────────
 try:
     import pandas as pd
@@ -630,6 +662,20 @@ div[data-testid="stExpander"] { border:1px solid var(--border) !important; borde
 }
 </style>
 """, unsafe_allow_html=True)
+
+# ── embed padding restoration ─────────────────────────────────────────────────
+# ?embed=true strips Streamlit's default top/bottom page padding. Rather than
+# ask visitors to remember &embed_options=show_padding on a "clean" shareable
+# link, restore comfortable spacing ourselves whenever we detect embed mode.
+if st.query_params.get("embed") == "true":
+    st.markdown(
+        """
+        <style>
+        .block-container { padding-top: 2.5rem !important; padding-bottom: 3rem !important; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 # ═════════════════════════════════════════════════════════════════════════════
