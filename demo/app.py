@@ -46,10 +46,14 @@ def _admin_token() -> str:
 
 
 def _enforce_embed_view() -> None:
-    params = st.query_params
     token = _admin_token()
-    is_admin = bool(token) and params.get("admin") == token
-    if "embed" not in params and not is_admin:
+    is_admin = bool(token) and st.query_params.get("admin") == token
+    # NOTE: "embed" is a reserved query param that Streamlit deliberately
+    # hides from st.query_params (it's consumed by the frontend chrome only),
+    # so checking `"embed" not in st.query_params` is always true and causes
+    # an infinite redirect loop. st.context.is_embedded is the documented way
+    # to detect embed mode from script code.
+    if not st.context.is_embedded and not is_admin:
         st.markdown(
             "<meta http-equiv='refresh' content='0; url=?embed=true'>",
             unsafe_allow_html=True,
@@ -667,7 +671,8 @@ div[data-testid="stExpander"] { border:1px solid var(--border) !important; borde
 # ?embed=true strips Streamlit's default top/bottom page padding. Rather than
 # ask visitors to remember &embed_options=show_padding on a "clean" shareable
 # link, restore comfortable spacing ourselves whenever we detect embed mode.
-if st.query_params.get("embed") == "true":
+# (st.context.is_embedded, not st.query_params — see note in _enforce_embed_view.)
+if st.context.is_embedded:
     st.markdown(
         """
         <style>
